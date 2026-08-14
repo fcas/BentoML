@@ -28,6 +28,8 @@ CONFIG_OVERRIDE_ENV_VAR = "BENTOML_CONFIG_OPTIONS"
 CONFIG_OVERRIDE_JSON_ENV_VAR = "BENTOML_CONFIG_OVERRIDES"
 # https://github.com/grpc/grpc/blob/master/doc/environment_variables.md
 GRPC_DEBUG_ENV_VAR = "GRPC_VERBOSITY"
+# The glibc version of python:3.11-slim image
+DEFAULT_LOCK_PLATFORM = "x86_64-manylinux_2_36"
 
 
 def get_bentoml_version() -> str:
@@ -56,48 +58,52 @@ def expand_env_var(env_var: str) -> str:
             env_var = interpolated
 
 
-def clean_bentoml_version(bentoml_version: str) -> str:
-    post_version = ".".join(bentoml_version.split(".")[:3])
+@lru_cache(maxsize=1)
+def clean_bentoml_version() -> str:
     try:
-        version = Version(post_version)
+        version = Version(BENTOML_VERSION).base_version
         return str(version)
     except ValueError:
         raise BentoMLException("Errors while parsing BentoML version.") from None
 
 
 @lru_cache(maxsize=1)
-def is_pypi_installed_bentoml() -> bool:
-    """Returns true if BentoML is installed via PyPI official release or installed from
-     source with a release tag, which should come with pre-built docker base image on
-     dockerhub.
+def is_editable_bentoml() -> bool:
+    """Returns true if BentoML is installed in editable mode."""
 
-    BentoML uses setuptools_scm to manage its versions, it looks at three things:
+    dist = importlib.metadata.distribution("bentoml")
+    direct_url_file = next(
+        (f for f in (dist.files or []) if str(f).endswith("direct_url.json")), None
+    )
+    if direct_url_file is None:
+        return False
+    direct_url_data = json.loads(direct_url_file.read_text())
+    return direct_url_data.get("dir_info", {}).get("editable", False)
 
-    * the latest tag (with a version number)
-    * the distance to this tag (e.g. number of revisions since latest tag)
-    * workdir state (e.g. uncommitted changes since latest tag)
 
-    BentoML uses setuptools_scm with `version_scheme = "post-release"` option, which
-    uses roughly the following logic to render the version:
-
-    * no distance and clean: {tag}
-    * distance and clean: {tag}.post{distance}+{scm letter}{revision hash}
-    * no distance and not clean: {tag}+dYYYYMMDD
-    * distance and not clean: {tag}.post{distance}+{scm letter}{revision hash}.dYYYYMMDD
-
-    This function looks at the version str and decide if BentoML installation is
-    base on a recent official release.
-    """
-    # In a git repo with no tag, setuptools_scm generated version starts with "0.1."
-    try:
-        from ..._version import __version_tuple__
-    except ImportError:
-        __version_tuple__ = (0, 0, 0, "dirty")
-
-    is_tagged = not BENTOML_VERSION.startswith("0.1.")
-    is_clean = not str(__version_tuple__[-1]).split(".")[-1].startswith("d")
-    not_been_modified = BENTOML_VERSION == BENTOML_VERSION.split("+")[0]
-    return is_tagged and is_clean and not_been_modified
+@lru_cache(maxsize=1)
+def get_bentoml_requirement() -> str | None:
+    """Returns the requirement string for BentoML."""
+    dist = importlib.metadata.distribution("bentoml")
+    no_bentoml_local_url = bool(os.getenv("BENTOML_NO_LOCAL_URL", False))
+    direct_url_file = next(
+        (f for f in (dist.files or []) if str(f).endswith("direct_url.json")), None
+    )
+    if direct_url_file is None or no_bentoml_local_url:
+        return f"bentoml=={BENTOML_VERSION}"
+    direct_url_data = json.loads(direct_url_file.read_text())
+    if direct_url_data.get("dir_info", {}).get("editable", False):
+        return None
+    if vcs_info := direct_url_data.get("vcs_info", None):
+        # NOTE: uv 0.5.22 installs direct_url.json without commit_id key
+        # This is a workaround to handle this case and should be removed in future
+        commit_id = vcs_info.get("commit_id") or vcs_info.get("requested_revision")
+        res = f"bentoml @ {vcs_info['vcs']}+{direct_url_data['url']}@{commit_id}"
+    else:
+        res = f"bentoml @ {direct_url_data['url']}"
+    if subdirectory := direct_url_data.get("subdirectory", None):
+        res += f"#subdirectory={subdirectory}"
+    return res
 
 
 def get_bentoml_config_file_from_env() -> str | None:
@@ -220,3 +226,37 @@ def set_serialization_strategy(serialization_strategy: SerializationStrategy):
     from ..configuration.containers import BentoMLContainer
 
     BentoMLContainer.serialization_strategy.set(serialization_strategy)
+
+
+@lru_cache(maxsize=1)
+def get_uv_command() -> list[str]:
+    """
+    Get the uv command
+    """
+    import shutil
+    import subprocess
+    import sys
+
+    if uv := shutil.which("uv"):
+        return [uv]
+
+    try:
+        importlib.metadata.version("uv")
+    except importlib.metadata.PackageNotFoundError:
+        install_cmd = [sys.executable, "-m", "pip", "install", "-q", "uv"]
+        logger.info(
+            "uv is not installed, installing it with: %s", " ".join(install_cmd)
+        )
+        try:
+            subprocess.run(
+                install_cmd,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+        except subprocess.CalledProcessError as e:
+            raise BentoMLConfigException(
+                f"Failed to install uv: {e.stderr.decode()}"
+            ) from None
+
+    return [sys.executable, "-m", "uv"]

@@ -6,15 +6,15 @@ import os
 import re
 import sys
 import typing as t
+from pathlib import Path
 from shutil import which
 
 import click
-import fs
 from simple_di import Provide
 from simple_di import inject
 
 from bentoml._internal.bento.bento import BENTO_YAML_FILENAME
-from bentoml._internal.bento.bento import DEFAULT_BENTO_BUILD_FILE
+from bentoml._internal.bento.bento import DEFAULT_BENTO_BUILD_FILES
 from bentoml._internal.bento.bento import Bento
 from bentoml._internal.bento.bento import BentoStore
 from bentoml._internal.configuration import get_debug_mode
@@ -58,22 +58,24 @@ def get_environment(
 ) -> Environment:
     # env created will be ephemeral
     if os.path.isdir(os.path.expanduser(bento_identifier)):
-        bento_path_fs = fs.open_fs(
-            os.path.abspath(os.path.expanduser(bento_identifier))
-        )
-        if bento_path_fs.isfile(BENTO_YAML_FILENAME):
+        bento_path = Path(bento_identifier).expanduser().resolve()
+        if (bento_path / BENTO_YAML_FILENAME).is_file():
             # path to a build bento dir
             return EnvManager.from_bento(
-                env_type=env, bento=Bento.from_fs(bento_path_fs)
+                env_type=env, bento=Bento.from_path(bento_path)
             ).environment
-        elif bento_path_fs.isfile(DEFAULT_BENTO_BUILD_FILE):
+        elif any(
+            bento_path.joinpath(filename).is_file()
+            for filename in DEFAULT_BENTO_BUILD_FILES
+        ):
             # path to a bento project
             raise NotImplementedError(
                 "Serving from development project is not yet supported."
             )
         else:
             raise BentoMLException(
-                f"EnvManager failed to create an environment from path {bento_path_fs}. When loading from a path, it must be either a Bento or a project directory containing '{DEFAULT_BENTO_BUILD_FILE}'."
+                f"EnvManager failed to create an environment from path {bento_path}. "
+                f"When loading from a path, it must be either a Bento or a project directory containing '{DEFAULT_BENTO_BUILD_FILES[0]}'."
             )
     else:
         try:

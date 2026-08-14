@@ -12,7 +12,33 @@ TEST_ARGS = [
     "-vv",
 ]
 
-PYTHON_VERSIONS = ["3.8", "3.9", "3.10", "3.11"]
+PYTHON_VERSIONS = ["3.9", "3.10", "3.11", "3.12"]
+
+FRAMEWORK_DEPENDENCIES = {
+    "catboost": ["catboost", "numpy<2"],
+    "diffusers": ["diffusers", "transformers<4.51", "tokenizer"],
+    "easyocr": ["easyocr"],
+    "fastai": ["fastai"],
+    "flax": [
+        "tensorflow",
+        "flax; platform_system!='Windows'",
+        "jax[cpu]; platform_system!='Windows'",
+        "jaxlib; platform_system!='Windows'",
+        "chex; platform_system!='Windows'",
+    ],
+    "keras": ["keras>=3.4"],
+    "lightgbm": ["lightgbm"],
+    "onnx": ["onnx==1.17.0", "onnxruntime", "skl2onnx"],
+    "picklable_model": [],
+    "pytorch": [],
+    "pytorch_lightning": ["lightning"],
+    "sklearn": ["scikit-learn"],
+    "tensorflow": ["tensorflow"],
+    "torchscript": [],
+    "xgboost": ["xgboost<3.2", "scikit-learn<1.6"],
+    "detectron": ["detectron2"],
+    "transformers": ["transformers", "tokenizer"],
+}
 
 
 @nox.session(python=PYTHON_VERSIONS, name="unit")
@@ -22,63 +48,20 @@ def run_unittest(session: nox.Session):
 
 
 @nox.session(name="framework-integration")
-@nox.parametrize(
-    "framework",
-    [
-        "catboost",
-        "diffusers",
-        "easyocr",
-        "fastai",
-        "flax",
-        "keras",
-        "lightgbm",
-        "onnx",
-        "picklable_model",
-        "pytorch",
-        "pytorch_lightning",
-        "sklearn",
-        "tensorflow",
-        "torchscript",
-        "xgboost",
-        "detectron",
-        "transformers",
-    ],
-)
+@nox.parametrize("framework", list(FRAMEWORK_DEPENDENCIES))
 def run_framework_integration_test(session: nox.Session, framework: str):
     session.run("pdm", "sync", "-G", "testing", external=True)
     session.install(
-        "torch",
+        "torch<2.6",
         "torchaudio",
         "torchvision",
         "-i",
         "https://download.pytorch.org/whl/cpu",
     )
-    session.install(
-        "catboost",
-        "lightgbm",
-        "mlflow",
-        "fastai",
-        "xgboost",
-        "scikit-learn",
-        "easyocr",
-        "datasets",
-        # ONNX dependencies
-        "onnx",
-        "onnxruntime",
-        "skl2onnx",
-        # tensorflow dependencies
-        "tensorflow~=2.13.1",
-        # torch-related dependencies
-        "lightning",
-        # huggingface dependencies
-        "transformers",
-        "tokenizer",
-        "diffusers",
-        "flax; platform_system!='Windows'",
-        "jax[cpu]; platform_system!='Windows'",
-        "jaxlib; platform_system!='Windows'",
-        "chex; platform_system!='Windows'",
-    )
+    deps = FRAMEWORK_DEPENDENCIES[framework]
+    if deps:
+        session.install(*deps)
+    session.run("pdm", "list", "--tree")
     session.run(
         *TEST_ARGS,
         "tests/integration/frameworks/test_frameworks.py",
@@ -101,8 +84,7 @@ def run_e2e_test(session: nox.Session, suite: str):
 @nox.session(name="e2e-monitoring", python=PYTHON_VERSIONS)
 def run_e2e_monitoring_test(session: nox.Session):
     session.run("pdm", "sync", "-G", "io,testing,monitor-otlp", external=True)
-    test_folder = "examples/monitoring/task_classification"
-    session.install("-r", os.path.join(test_folder, "requirements.txt"))
+    test_folder = "tests/monitoring/task_classification"
     os.makedirs(os.path.join(test_folder, "monitoring"), exist_ok=True)
     session.run(*TEST_ARGS, test_folder)
 

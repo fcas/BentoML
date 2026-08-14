@@ -10,6 +10,7 @@ from datetime import datetime
 from datetime import timezone
 from functools import lru_cache
 from functools import wraps
+from reprlib import recursive_repr as _recursive_repr
 from typing import TYPE_CHECKING
 
 import attr
@@ -19,7 +20,6 @@ from simple_di import inject
 
 from ...configuration import get_debug_mode
 from ...configuration.containers import BentoMLContainer
-from ...utils import compose
 from .schemas import CommonProperties
 from .schemas import EventMeta
 from .schemas import ServeInitEvent
@@ -27,16 +27,18 @@ from .schemas import ServeUpdateEvent
 from .schemas import TrackingPayload
 
 if TYPE_CHECKING:
-    P = t.ParamSpec("P")
-    T = t.TypeVar("T")
-    AsyncFunc = t.Callable[P, t.Coroutine[t.Any, t.Any, t.Any]]
-
     from prometheus_client.samples import Sample
+    from typing_extensions import Self
 
     from _bentoml_sdk import Service as NewService
-    from bentoml import Service
+    from bentoml.legacy import Service
 
     from ...server.metrics.prometheus import PrometheusClient
+
+    P = t.ParamSpec("P")
+    T = t.TypeVar("T")
+    F = t.Callable[P, t.Any]
+    AsyncFunc = t.Callable[P, t.Coroutine[t.Any, t.Any, t.Any]]
 
 logger = logging.getLogger(__name__)
 
@@ -49,20 +51,20 @@ USAGE_REQUEST_TIMEOUT_SECONDS = 1
 
 @lru_cache(maxsize=None)
 def _bentoml_serve_from_server_api() -> bool:
-    return os.environ.get(BENTOML_SERVE_FROM_SERVER_API, str(False)).lower() == "true"
+    return os.environ.get(BENTOML_SERVE_FROM_SERVER_API, "False").lower() == "true"
 
 
 @lru_cache(maxsize=1)
 def do_not_track() -> bool:  # pragma: no cover
     # Returns True if and only if the environment variable is defined and has value True.
     # The function is cached for better performance.
-    return os.environ.get(BENTOML_DO_NOT_TRACK, str(False)).lower() == "true"
+    return os.environ.get(BENTOML_DO_NOT_TRACK, "False").lower() == "true"
 
 
 @lru_cache(maxsize=1)
 def _usage_event_debugging() -> bool:
     # For BentoML developers only - debug and print event payload if turned on
-    return os.environ.get("__BENTOML_DEBUG_USAGE", str(False)).lower() == "true"
+    return os.environ.get("__BENTOML_DEBUG_USAGE", "False").lower() == "true"
 
 
 def silent(func: t.Callable[P, T]) -> t.Callable[P, T]:  # pragma: no cover
@@ -134,12 +136,13 @@ def _track_serve_init(
     from_server_api: bool,
     serve_info: ServeInfo = Provide[BentoMLContainer.serve_info],
 ):
-    from bentoml import Service
+    from bentoml.legacy import Service
 
     is_legacy = isinstance(svc, Service)
 
     if svc.bento is not None:
         bento = svc.bento
+        apis = getattr(bento.info, "apis", [])
         event_properties = ServeInitEvent(
             serve_id=serve_info.serve_id,
             serve_from_bento=True,
@@ -149,11 +152,13 @@ def _track_serve_init(
             bento_creation_timestamp=bento.info.creation_time,
             num_of_models=len(bento.info.all_models),
             num_of_runners=len(svc.runners) if is_legacy else len(svc.dependencies),
-            num_of_apis=len(bento.info.apis),
+            num_of_apis=len(apis),
             model_types=[m.module for m in bento.info.all_models],
-            runnable_types=[r.runnable_type for r in bento.info.runners],
-            api_input_types=[api.input_type for api in bento.info.apis],
-            api_output_types=[api.output_type for api in bento.info.apis],
+            runnable_types=[
+                r.runnable_type for r in getattr(bento.info, "runners", [])
+            ],
+            api_input_types=[api.input_type for api in apis],
+            api_output_types=[api.output_type for api in apis],
         )
     else:
         if is_legacy:
@@ -164,15 +169,16 @@ def _track_serve_init(
                 )
             )
         else:
-            from bentoml import Model
 
-            def _get_models(svc: NewService[t.Any], seen: set[str]) -> t.Set[Model]:
+            def _get_models(svc: NewService[t.Any], seen: set[str]) -> set[int]:
                 if svc.name in seen:
                     return set()
                 seen.add(svc.name)
-                models = set(svc.models)
+                # Fix: Ensure models are hashable by using id()
+                models = {id(model) for model in svc.models}
                 for dep in svc.dependencies.values():
-                    models.update(_get_models(dep.on, seen))
+                    if dep.on is not None:
+                        models.update(_get_models(dep.on, seen))
                 return models
 
             num_models = len(_get_models(svc, set()))
@@ -190,7 +196,7 @@ def _track_serve_init(
             runnable_types=(
                 [r.runnable_class.__name__ for r in svc.runners]
                 if is_legacy
-                else [d.on.name for d in svc.dependencies.values()]
+                else [d.on.name for d in svc.dependencies.values() if d.on is not None]
             ),
             api_input_types=(
                 [api.input.__class__.__name__ for api in svc.apis.values()]
@@ -208,6 +214,63 @@ def _track_serve_init(
 
 
 EXCLUDE_PATHS = {"/docs.json", "/livez", "/healthz", "/readyz"}
+
+
+class compose:
+    """
+    Function composition: compose(f, g)(...) is equivalent to f(g(...)).
+    Refer to https://github.com/mentalisttraceur/python-compose for original implementation.
+
+    Args:
+        *functions: Functions (or other callables) to compose.
+
+    Raises:
+        TypeError: If no arguments are given, or any argument is not callable.
+    """
+
+    def __init__(self: Self, *functions: F[t.Any]):
+        if not functions:
+            raise TypeError(f"{self!r} needs at least one argument.")
+        _functions: list[F[t.Any]] = []
+        for function in reversed(functions):
+            if not callable(function):
+                raise TypeError(f"{self!r} arguments must be callable.")
+            if isinstance(function, compose):
+                _functions.extend(function.functions)
+            else:
+                _functions.append(function)
+        self.__wrapped__ = _functions[0]
+        self._wrappers = tuple(_functions[1:])
+
+    def __call__(self, *args: t.Any, **kwargs: t.Any) -> t.Any:
+        """Call the composed function."""
+        result = self.__wrapped__(*args, **kwargs)
+        for function in self._wrappers:
+            result = function(result)
+        return result
+
+    def __get__(self, obj: t.Any, typ_: type | None = None):
+        """Get the composed function as a bound method."""
+        wrapped = self.__wrapped__
+        try:
+            bind = type(wrapped).__get__
+        except AttributeError:
+            return self
+        bound_wrapped = bind(wrapped, obj, typ_)
+        if bound_wrapped is wrapped:
+            return self
+        bound_self = type(self)(bound_wrapped)
+        bound_self._wrappers = self._wrappers
+        return bound_self
+
+    @_recursive_repr("<...>")
+    def __repr__(self):
+        return f"{self!r}({','.join(map(repr, reversed(self.functions)))})"
+
+    @property
+    def functions(self):
+        """Read-only tuple of the composed callables, in order of execution."""
+        return (self.__wrapped__,) + tuple(self._wrappers)
 
 
 def filter_metrics(

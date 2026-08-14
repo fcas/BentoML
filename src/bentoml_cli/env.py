@@ -11,6 +11,8 @@ import typing as t
 from gettext import gettext
 
 import click
+import rich
+import rich.pretty
 
 from bentoml._internal.utils.pkg import PackageNotFoundError
 from bentoml._internal.utils.pkg import get_pkg_version
@@ -58,7 +60,7 @@ def _format_dropdown(title: str, content: t.Iterable[str]) -> str:
 
 <br>
 
-```{ 'yaml' if title == conda_packages_name else '' }
+```{"yaml" if title == conda_packages_name else ""}
 {processed}
 ```
 
@@ -119,6 +121,8 @@ def pretty_format(
 )
 @click.pass_context
 def env_command(ctx: click.Context, output: t.Literal["md", "bash"]) -> None:  # type: ignore (unused warning)
+    from bentoml._internal.configuration import get_uv_command
+
     if output not in ["md", "bash"]:
         raise CLIException(f"Unknown output format: {output}")
 
@@ -146,9 +150,9 @@ def env_command(ctx: click.Context, output: t.Literal["md", "bash"]) -> None:  #
             if shutil.which(possible_exec) is not None:
                 conda_like = possible_exec
                 break
-        assert (
-            conda_like is not None
-        ), "couldn't find a conda-like executable, while CONDA_PREFIX is set."
+        assert conda_like is not None, (
+            "couldn't find a conda-like executable, while CONDA_PREFIX is set."
+        )
         conda_packages = run_cmd([conda_like, "env", "export"])
 
         # user is currently in a conda environment,
@@ -159,11 +163,10 @@ def env_command(ctx: click.Context, output: t.Literal["md", "bash"]) -> None:  #
             conda_version = run_cmd([conda_like, "--version"])[0].split(" ")[-1]
 
         info_dict[conda_like] = conda_version
-        info_dict["in_conda_env"] = str(True)
+        info_dict["in_conda_env"] = "True"
         info_dict["conda_packages"] = conda_packages
 
     # process info from `pip freeze`
-    pip_packages = run_cmd([sys.executable, "-m", "pip", "freeze"])
+    pip_packages = run_cmd([*get_uv_command(), "pip", "freeze"])
     info_dict["pip_packages"] = pip_packages
-    click.echo(pretty_format(info_dict, output=output))
-    ctx.exit(0)
+    rich.print(pretty_format(info_dict, output=output))

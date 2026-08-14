@@ -12,13 +12,10 @@ USER root
     amazon-linux-extras enable python{{ __options__python_version }} && \
     yum install -y python{{ __options__python_version.split(".") | join('') }} python{{ __options__python_version.split(".") | join('') }}-devel && \
     yum groupinstall -y "Development Tools"
-
-RUN curl -O https://bootstrap.pypa.io/get-pip.py && \
-    python{{ __options__python_version }} get-pip.py
 {% if __options__system_packages is not none %}
 # Install user-defined system package
 {% call common.RUN(__enable_buildkit__) -%} {{ common.mount_cache("/var/cache/yum") }} {% endcall -%} set -eux && \
-    yum install -y {{ __options__system_packages | join(' ') }}
+    yum install -y {{ __options__system_packages | map('bash_quote') | join(' ') }}
 {% endif -%}
 RUN ln -sf /usr/bin/python{{ __options__python_version }} /usr/bin/python3 && \
     ln -sf /usr/bin/pip{{ __options__python_version }} /usr/bin/pip3

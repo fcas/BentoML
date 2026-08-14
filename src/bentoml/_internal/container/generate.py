@@ -1,24 +1,26 @@
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 import shlex
 import typing as t
+from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from jinja2 import Environment
 from jinja2.loaders import FileSystemLoader
+from jinja2.sandbox import SandboxedEnvironment as Environment
 
 from ..configuration.containers import BentoMLContainer
-from ..utils import resolve_user_filepath
+from ..utils.filesystem import resolve_user_filepath
 from .frontend.dockerfile import DistroSpec
+from .frontend.dockerfile import get_cuda_base_image
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     P = t.ParamSpec("P")
-
-    from fs.base import FS
 
     from ..bento.build_config import CondaOptions
     from ..bento.build_config import DockerOptions
@@ -32,6 +34,15 @@ BENTO_HOME = f"/home/{BENTO_USER}/"
 BENTO_PATH = f"{BENTO_HOME}bento"
 # 1.2.1 is the current docker frontend that both buildkitd and kaniko supports.
 BENTO_BUILDKIT_FRONTEND = "docker/dockerfile:1.2.1"
+DEFAULT_BENTO_ENVS = {
+    "uid_gid": BENTO_UID_GID,
+    "user": BENTO_USER,
+    "home": BENTO_HOME,
+    "path": BENTO_PATH,
+    "add_header": True,
+    "buildkit_frontend": BENTO_BUILDKIT_FRONTEND,
+    "enable_buildkit": True,
+}
 
 
 def expands_bento_path(*path: str, bento_path: str = BENTO_PATH) -> str:
@@ -40,6 +51,13 @@ def expands_bento_path(*path: str, bento_path: str = BENTO_PATH) -> str:
     Note on using "/": the returned path is meant to be used in the generated Dockerfile.
     """
     return "/".join([bento_path, *path])
+
+
+def normalize_line(s: str) -> str:
+    """
+    Normalize a line by stripping leading and trailing whitespaces and replacing multiple spaces with a single space.
+    """
+    return " ".join(s.strip().split())
 
 
 J2_FUNCTION: dict[str, F[t.Any]] = {"expands_bento_path": expands_bento_path}
@@ -56,7 +74,7 @@ def to_options_field(s: str):
 def get_templates_variables(
     docker: DockerOptions,
     conda: CondaOptions,
-    bento_fs: FS,
+    bento_fs: Path,
     *,
     python_packages: dict[str, str] | None = None,
     _is_cuda: bool = False,
@@ -79,27 +97,15 @@ def get_templates_variables(
         spec = DistroSpec.from_options(docker, conda)
         python_version = docker.python_version
         assert docker.distro is not None and python_version is not None
-        if docker.distro in ("ubi8"):
+        if docker.distro in ("ubi8",):
             # ubi8 base images uses "py38" instead of "py3.8" in its image tag
             python_version = python_version.replace(".", "")
         base_image = spec.image.format(spec_version=python_version)
         if docker.cuda_version is not None:
-            base_image = spec.image.format(spec_version=docker.cuda_version)
+            base_image = get_cuda_base_image(docker.distro, docker.cuda_version)
 
     # bento__env
-    default_env = {
-        "uid_gid": BENTO_UID_GID,
-        "user": BENTO_USER,
-        "home": BENTO_HOME,
-        "path": BENTO_PATH,
-        "add_header": True,
-        "buildkit_frontend": BENTO_BUILDKIT_FRONTEND,
-        "enable_buildkit": True,
-    }
-    if bento_env:
-        default_env.update(bento_env)
-
-    PREHEAT_PIP_PACKAGES = ["torch", "vllm"]
+    default_env = {**DEFAULT_BENTO_ENVS, **bento_env}
 
     return {
         **{to_options_field(k): v for k, v in docker.to_dict().items()},
@@ -108,12 +114,24 @@ def get_templates_variables(
         "__base_image__": base_image,
         "__conda_python_version__": conda_python_version,
         "__is_cuda__": _is_cuda,
-        "__pip_preheat_packages__": [
-            python_packages[k]
-            for k in PREHEAT_PIP_PACKAGES
-            if python_packages and python_packages.get(k)
-        ],
     }
+
+
+@lru_cache(maxsize=1)
+def build_environment() -> Environment:
+    templates_path = importlib.import_module(
+        "bentoml._internal.container.frontend.dockerfile.templates"
+    ).__path__
+    environment = Environment(
+        extensions=["jinja2.ext.loopcontrols"],
+        trim_blocks=True,
+        lstrip_blocks=True,
+        loader=FileSystemLoader(templates_path, followlinks=True),
+    )
+    environment.filters["bash_quote"] = shlex.quote
+    environment.filters["normalize_line"] = normalize_line
+    environment.globals["expands_bento_path"] = expands_bento_path
+    return environment
 
 
 def generate_containerfile(
@@ -121,7 +139,7 @@ def generate_containerfile(
     build_ctx: str,
     *,
     conda: CondaOptions,
-    bento_fs: FS,
+    bento_fs: Path,
     frontend: str = "dockerfile",
     **override_bento_env: t.Any,
 ) -> str:
@@ -158,16 +176,10 @@ def generate_containerfile(
 
         Overriding templates variables: bento__uid_gid, bento__user, bento__home, bento__path, bento__enable_buildkit
     """
-    TEMPLATES_PATH = [
-        os.path.join(os.path.dirname(__file__), "frontend", frontend, "templates")
-    ]
-    ENVIRONMENT = Environment(
-        extensions=["jinja2.ext.do", "jinja2.ext.loopcontrols", "jinja2.ext.debug"],
-        trim_blocks=True,
-        lstrip_blocks=True,
-        loader=FileSystemLoader(TEMPLATES_PATH, followlinks=True),
-    )
-    ENVIRONMENT.filters["bash_quote"] = shlex.quote
+    templates_path = importlib.import_module(
+        "bentoml._internal.container.frontend.dockerfile.templates"
+    ).__path__
+    ENVIRONMENT = build_environment()
 
     if docker.cuda_version is not None:
         release_type = "cuda"
@@ -184,27 +196,27 @@ def generate_containerfile(
     logger.debug(
         'Using base Dockerfile template: "%s" (path: "%s")',
         base,
-        os.path.join(TEMPLATES_PATH[0], base),
+        os.path.join(templates_path[0], base),
     )
 
     user_templates = docker.dockerfile_template
     if user_templates is not None:
         dir_path = os.path.dirname(resolve_user_filepath(user_templates, build_ctx))
         user_templates = os.path.basename(user_templates)
-        TEMPLATES_PATH.append(dir_path)
+        templates_path.append(dir_path)
         environment = ENVIRONMENT.overlay(
-            loader=FileSystemLoader(TEMPLATES_PATH, followlinks=True)
+            loader=FileSystemLoader(templates_path, followlinks=True)
         )
         template = environment.get_template(
             user_templates,
             globals={"bento_base_template": template, **J2_FUNCTION},
         )
 
-    requirement_file = bento_fs.getsyspath("env/python/requirements.lock.txt")
-    if not os.path.exists(requirement_file):
-        requirement_file = bento_fs.getsyspath("env/python/requirements.txt")
-    if os.path.exists(requirement_file):
-        python_packages = _resolve_package_versions(requirement_file)
+    requirement_file = bento_fs.joinpath("env/python/requirements.lock.txt")
+    if not requirement_file.exists():
+        requirement_file = bento_fs.joinpath("env/python/requirements.txt")
+    if requirement_file.exists():
+        python_packages = resolve_package_versions(str(requirement_file))
     else:
         python_packages = {}
 
@@ -220,7 +232,7 @@ def generate_containerfile(
     )
 
 
-def _resolve_package_versions(requirement: str) -> dict[str, str]:
+def resolve_package_versions(requirement: str) -> dict[str, str]:
     from pip_requirements_parser import RequirementsFile
 
     requirements_txt = RequirementsFile.from_file(

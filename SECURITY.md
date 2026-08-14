@@ -15,6 +15,22 @@ or [BentoML Discussions](https://github.com/bentoml/BentoML/discussions).
 
 ## Reporting a Vulnerability
 
-To report a vulnerability, please do not share it publicly on GitHub
-nor the community slack channel. Instead, contact the BentoML team
-directly via email first: contact@bentoml.ai
+If you discover a potential security vulnerability, we kindly request that you refrain from sharing the information publicly and report it to us directly. Please send an email to security@bentoml.com with the following details:
+
+* Description of the potential vulnerability.
+* Steps to reproduce the issue (if applicable).
+* Any relevant screenshots or logs.
+* Your contact information for further communication.
+
+Alternatively, you can [open a security advisory](https://github.com/bentoml/BentoML/security/advisories/new) on GitHub.
+
+## Exceptions
+
+The following reports are out of scope and will not be accepted as
+security vulnerabilities:
+
+* Reports about pickle-related vulnerabilities in the runner service or
+  dependency service. We consider these scenarios to be purely
+  theoretical and not a practical vulnerability in BentoML.
+
+BentoML does not participate in Huntr.com's bug bounty program; we have no budget for bug bounties at this time nor do we plan to in the future.

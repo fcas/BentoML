@@ -28,9 +28,10 @@ def reload_directory(
     ./
     ├── models/  # mock default bentoml home models directory
     ├── [fdir, fdir_one, fdir_two]/
+    │   ├── .bentoignore
     │   ├── README.md
-        ├── subdir/
-        │   ├── README.md
+    │   ├── subdir/
+    │   │   ├── README.md
     │   │   └── app.py
     │   ├── somerust.rs
     │   └── app.py
@@ -43,7 +44,7 @@ def reload_directory(
     └── train.py
     """
     from bentoml._internal.bento.build_config import BentoBuildConfig
-    from bentoml._internal.utils import bentoml_cattr
+    from bentoml._internal.utils.cattr import bentoml_cattr
 
     root = tmp_path_factory.mktemp("reload_directory")
     # create a models directory
@@ -67,17 +68,19 @@ def reload_directory(
     build_config = BentoBuildConfig(
         service="service.py:svc",
         description="A mock service",
-        exclude=["*.rs"],
     ).with_defaults()
     bentofile = root / "bentofile.yaml"
     bentofile.touch()
     with bentofile.open("w", encoding="utf-8") as f:
         yaml.safe_dump(bentoml_cattr.unstructure(build_config), f)
 
+    (root / ".bentoignore").write_text("*.rs\n")
+
     custom_library = ["fdir", "fdir_one", "fdir_two"]
     for app in custom_library:
         ap = root.joinpath(app)
         ap.mkdir()
+        (ap / ".bentoignore").write_text("*.temp\n")
         dir_files: list[tuple[str, list[t.Any]]] = [
             ("README.md", []),
             ("subdir", ["README.md", "app.py"]),
@@ -99,7 +102,7 @@ def reload_directory(
 
 
 @pytest.fixture(scope="session")
-def simple_service() -> bentoml.Service:
+def simple_service() -> bentoml.legacy.Service:
     """
     This fixture create a simple service implementation that implements a noop runnable with two APIs:
 
@@ -123,20 +126,20 @@ def simple_service() -> bentoml.Service:
 
     model_ref = bentoml.models.get("python_function")
 
-    class NoopRunnable(bentoml.Runnable):
+    class NoopRunnable(bentoml.legacy.Runnable):
         SUPPORTED_RESOURCES = ("cpu",)
         SUPPORTS_CPU_MULTI_THREADING = True
 
         def __init__(self):
             self._model: NoopModel = bentoml.picklable_model.load_model(model_ref)
 
-        @bentoml.Runnable.method(batchable=True)
+        @bentoml.legacy.Runnable.method(batchable=True)
         def predict(self, data: t.Any) -> t.Any:
             return self._model.predict(data)
 
-    svc = bentoml.Service(
+    svc = bentoml.legacy.Service(
         name="simple_service",
-        runners=[bentoml.Runner(NoopRunnable, models=[model_ref])],
+        runners=[bentoml.legacy.Runner(NoopRunnable, models=[model_ref])],
     )
 
     @svc.api(input=Text(), output=Text())

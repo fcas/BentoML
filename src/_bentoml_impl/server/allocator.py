@@ -25,6 +25,13 @@ class ResourceAllocator:
             for _ in range(self.remaining_gpus)
         ]
 
+    @staticmethod
+    def gpu_allocation_disabled() -> bool:
+        return (
+            DISABLE_GPU_ALLOCATION_ENV in os.environ
+            or "CUDA_VISIBLE_DEVICES" in os.environ
+        )
+
     def assign_gpus(self, count: float) -> list[int]:
         if count > self.remaining_gpus:
             warnings.warn(
@@ -86,26 +93,23 @@ class ResourceAllocator:
         self,
         service: Service[Any],
         services: dict[str, Any] = Provide[BentoMLContainer.config.services],
-    ) -> tuple[int, list[dict[str, str]]]:
+    ) -> tuple[int, dict[str, str]]:
         config = services[service.name]
 
         num_gpus = 0
         num_workers = 1
-        worker_env: list[dict[str, str]] = []
+        worker_env: dict[str, str] = {}
         if "gpu" in (config.get("resources") or {}):
             num_gpus = config["resources"]["gpu"]  # type: ignore
         if config.get("workers"):
             if (workers := config["workers"]) == "cpu_count":
-                num_workers = int(self.system_resources["cpu"])
+                num_workers = int(self.system_resources["cpu"]) or 1
                 # don't assign gpus to workers
                 return num_workers, worker_env
             else:  # workers is a number
                 num_workers = workers
-        if num_gpus and DISABLE_GPU_ALLOCATION_ENV not in os.environ:
+        if num_gpus and not self.gpu_allocation_disabled():
             assigned = self.assign_gpus(num_gpus)
             # assign gpus to all workers
-            worker_env = [
-                {"CUDA_VISIBLE_DEVICES": ",".join(map(str, assigned))}
-                for _ in range(num_workers)
-            ]
+            worker_env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, assigned))
         return num_workers, worker_env

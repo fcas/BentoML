@@ -14,7 +14,7 @@ from bentoml.exceptions import BentoMLException
 from bentoml.exceptions import MissingDependencyException
 from bentoml.exceptions import NotFound
 from bentoml.models import ModelContext
-from bentoml.models import ModelOptions
+from bentoml.models import ModelOptions as BaseModelOptions
 
 from ..utils.pkg import PackageNotFoundError
 from ..utils.pkg import get_pkg_version
@@ -57,7 +57,7 @@ def flatten_providers_list(lst: ProvidersType) -> list[str]:
 
 
 @attr.define
-class ONNXOptions(ModelOptions):
+class ModelOptions(BaseModelOptions):
     """Options for the ONNX model"""
 
     input_specs: dict[str, list[dict[str, t.Any]]] = attr.field(factory=dict)
@@ -262,9 +262,9 @@ def save_model(
             break
         except PackageNotFoundError:
             pass
-    assert (
-        _onnxruntime_pkg is not None and _onnxruntime_version is not None
-    ), "Failed to find onnxruntime package version."
+    assert _onnxruntime_pkg is not None and _onnxruntime_version is not None, (
+        "Failed to find onnxruntime package version."
+    )
 
     assert _onnxruntime_version is not None, "onnxruntime is not installed"
     if not isinstance(model, onnx.ModelProto):
@@ -291,7 +291,7 @@ def save_model(
         provided_methods = list(signatures.keys())
         if provided_methods != ["run"]:
             raise BentoMLException(
-                f"Provided method names {[m for m  in provided_methods if m != 'run']} are invalid. 'bentoml.onnx' will load ONNX model into an 'onnxruntime.InferenceSession' for inference, so the only supported method name is 'run'."
+                f"Provided method names {[m for m in provided_methods if m != 'run']} are invalid. 'bentoml.onnx' will load ONNX model into an 'onnxruntime.InferenceSession' for inference, so the only supported method name is 'run'."
             )
 
     run_input_specs = [MessageToDict(inp) for inp in model.graph.input]
@@ -299,7 +299,7 @@ def save_model(
     input_specs = {"run": run_input_specs}
     output_specs = {"run": run_output_specs}
 
-    options = ONNXOptions(input_specs=input_specs, output_specs=output_specs)
+    options = ModelOptions(input_specs=input_specs, output_specs=output_specs)
 
     with bentoml.models._create(  # type: ignore
         name,
@@ -318,7 +318,7 @@ def save_model(
         return bento_model
 
 
-def get_runnable(bento_model: bentoml.Model) -> t.Type[bentoml.Runnable]:
+def get_runnable(bento_model: bentoml.Model) -> t.Type[bentoml.legacy.Runnable]:
     """
     Private API: use :obj:`~bentoml.Model.to_runnable` instead.
     """
@@ -327,7 +327,7 @@ def get_runnable(bento_model: bentoml.Model) -> t.Type[bentoml.Runnable]:
     # input_specs/output_specs for onnx model
     if bento_model.info.api_version == "v1":
         raw_model: onnx.ModelProto | None = None
-        options = t.cast(ONNXOptions, bento_model.info.options)
+        options = t.cast(ModelOptions, bento_model.info.options)
 
         if not options.input_specs:
             raw_model = _load_raw_model(bento_model)
@@ -341,7 +341,7 @@ def get_runnable(bento_model: bentoml.Model) -> t.Type[bentoml.Runnable]:
             output_specs = {"run": run_output_specs}
             bento_model = bento_model.with_options(output_specs=output_specs)
 
-    class ONNXRunnable(bentoml.Runnable):
+    class ONNXRunnable(bentoml.legacy.Runnable):
         SUPPORTED_RESOURCES = ("nvidia.com/gpu", "cpu")
         SUPPORTS_CPU_MULTI_THREADING = True
 
@@ -436,7 +436,7 @@ def get_runnable(bento_model: bentoml.Model) -> t.Type[bentoml.Runnable]:
         )
 
     for method_name, signatures in bento_model.info.signatures.items():
-        options = t.cast(ONNXOptions, bento_model.info.options)
+        options = t.cast(ModelOptions, bento_model.info.options)
         input_specs = options.input_specs[method_name]
         output_specs = options.output_specs[method_name]
         add_runnable_method(method_name, signatures, input_specs, output_specs)

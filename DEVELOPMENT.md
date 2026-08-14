@@ -1,8 +1,8 @@
 # Developer Guide
 
-Before getting started, check out the `#bentoml-contributors` channel in the [BentoML community slack](https://l.bentoml.com/join-slack).
+Before getting started, check out the [BentoML community forum](https://forum.modular.com/c/bento/31).
 
-If you are interested in contributing to existing issues and feature requets, check out the [good-first-issue](https://github.com/bentoml/BentoML/issues?q=is%3Aopen+is%3Aissue+label%3Agood-first-issue) and [help-wanted](https://github.com/bentoml/BentoML/issues?q=is%3Aopen+is%3Aissue+label%3Ahelp-wanted) issues list.
+If you are interested in contributing to existing issues and feature requests, check out the [good-first-issue](https://github.com/bentoml/BentoML/issues?q=is%3Aopen+is%3Aissue+label%3Agood-first-issue) and [help-wanted](https://github.com/bentoml/BentoML/issues?q=is%3Aopen+is%3Aissue+label%3Ahelp-wanted) issues list.
 
 If you are interested in proposing a new feature, make sure to create a new feature request ticket [here](https://github.com/bentoml/BentoML/issues/new/choose) and share your proposal in the `#bentoml-contributors` slack channel for feedback.
 
@@ -12,7 +12,7 @@ If you are interested in proposing a new feature, make sure to create a new feat
 
 1. Make sure to have [Git](https://git-scm.com/),
    [pip](https://pip.pypa.io/en/stable/installation/),
-   [Python3.8+](https://www.python.org/downloads/), and
+   [Python3.9+](https://www.python.org/downloads/), and
    [PDM](https://pdm.fming.dev/latest/) installed.
 
    Optionally, make sure to have [GNU Make](https://www.gnu.org/software/make/)
@@ -75,7 +75,7 @@ If you are interested in proposing a new feature, make sure to create a new feat
 
 1. Confirm that you have the following installed:
 
-   - [Python3.8+](https://www.python.org/downloads/)
+   - [Python3.9+](https://www.python.org/downloads/)
    - VS Code with the [Python](https://marketplace.visualstudio.com/items?itemName=ms-python.python) and [Pylance](https://marketplace.visualstudio.com/items?itemName=ms-python.vscode-pylance) extensions
 
 2. Fork the BentoML project on [GitHub](https://github.com/bentoml/BentoML).
@@ -216,7 +216,7 @@ bentoml get IrisClassifier --verbose
 
 We are using [pre-commit](https://pre-commit.com/) to manage our hooks, and
 [buf](https://github.com/bufbuild/buf) for formatting and linting of our proto
-files. Configuration can be found [here](./bentoml/grpc/buf.yaml). Currently, we
+files. Configuration can be found [here](./src/bentoml/grpc/buf.yaml). Currently, we
 are running `buf` with docker, hence we kindly ask our developers to have docker
 available. Docker installation can be found
 [here](https://docs.docker.com/get-docker/).
@@ -264,10 +264,10 @@ pip install git+https://github.com/{YOUR_GITHUB_USERNAME}/bentoml@{YOUR_REVISION
 And in your BentoML projects' `bentofile.yaml`, force the Bento to install this distribution, e.g.:
 
 ```yaml
-service: "service:svc"
-description: "file: ./README.md"
+service: 'service:svc'
+description: 'file: ./README.md'
 include:
-  - "*.py"
+  - '*.py'
 python:
   packages:
     - pandas

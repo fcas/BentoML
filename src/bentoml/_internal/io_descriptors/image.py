@@ -5,7 +5,7 @@ import io
 import typing as t
 from urllib.parse import quote
 
-from multipart.multipart import parse_options_header
+from python_multipart.multipart import parse_options_header
 from starlette.datastructures import UploadFile
 from starlette.requests import Request
 from starlette.responses import Response
@@ -19,9 +19,9 @@ from ..service.openapi import SUCCESS_DESCRIPTION
 from ..service.openapi.specification import MediaType
 from ..service.openapi.specification import Schema
 from ..types import LazyType
-from ..utils import LazyLoader
-from ..utils import resolve_user_filepath
+from ..utils.filesystem import resolve_user_filepath
 from ..utils.http import set_cookies
+from ..utils.lazy_loader import LazyLoader
 from .base import IODescriptor
 
 PIL_EXC_MSG = "'Pillow' is required to use the Image IO descriptor. Install with 'pip install bentoml[io-image]'."
@@ -108,7 +108,7 @@ class Image(
 
        runner = bentoml.tensorflow.get('image-classification:latest').to_runner()
 
-       svc = bentoml.Service("vit-object-detection", runners=[runner])
+       svc = bentoml.legacy.Service("vit-object-detection", runners=[runner])
 
        @svc.api(input=Image(), output=NumpyNdarray(dtype="float32"))
        async def predict_image(f: Image) -> NDArray[Any]:
@@ -196,17 +196,6 @@ class Image(
                 f"Invalid Image mime_type '{mime_type}'; supported mime types are {', '.join(PIL.Image.MIME.values())} "
             )
 
-        for mtype in self._allowed_mimes:
-            if mtype not in MIME_EXT_MAPPING:  # pragma: no cover
-                raise InvalidArgument(
-                    f"Invalid Image MIME in allowed_mime_types: '{mtype}'; supported mime types are {', '.join(PIL.Image.MIME.values())} "
-                )
-
-            if mtype not in READABLE_MIMES:
-                raise InvalidArgument(
-                    f"Pillow does not support reading '{mtype}' files."
-                )
-
         self._pilmode: _Mode | None = pilmode
         self._format: str = MIME_EXT_MAPPING[self._mime_type]
 
@@ -261,7 +250,7 @@ class Image(
         if LazyType["ext.NpNDArray"]("numpy.ndarray").isinstance(sample):
             sample = PIL.Image.fromarray(sample)
         elif isinstance(sample, str):
-            p = resolve_user_filepath(sample, ctx=None)
+            p = resolve_user_filepath(sample, ctx=None, secure=False)
             try:
                 with open(p, "rb") as f:
                     sample = PIL.Image.open(f)
@@ -439,7 +428,7 @@ class Image(
                         )
                 except KeyError:
                     raise BadInput(
-                        f"{field.kind} is not a valid File kind. Accepted file kind: {[names for names,_ in pb_v1alpha1.File.FileType.items()]}",
+                        f"{field.kind} is not a valid File kind. Accepted file kind: {[names for names, _ in pb_v1alpha1.File.FileType.items()]}",
                     ) from None
             if not field.content:
                 raise BadInput("Content is empty!") from None

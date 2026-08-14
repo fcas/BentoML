@@ -2,22 +2,21 @@ from __future__ import annotations
 
 import typing as t
 from datetime import datetime
-from unittest.mock import patch
 
 import attr
 import pytest
 
 from bentoml._internal.cloud.client import RestApiClient
-from bentoml._internal.cloud.deployment import Deployment
+from bentoml._internal.cloud.deployment import DeploymentAPI
 from bentoml._internal.cloud.deployment import DeploymentConfigParameters
 from bentoml._internal.cloud.schemas.modelschemas import BentoImageBuildStatus
-from bentoml._internal.cloud.schemas.modelschemas import BentoUploadStatus
 from bentoml._internal.cloud.schemas.modelschemas import DeploymentRevisionStatus
 from bentoml._internal.cloud.schemas.modelschemas import DeploymentServiceConfig
 from bentoml._internal.cloud.schemas.modelschemas import DeploymentStatus
 from bentoml._internal.cloud.schemas.modelschemas import DeploymentTargetHPAConf
 from bentoml._internal.cloud.schemas.modelschemas import EnvItemSchema
 from bentoml._internal.cloud.schemas.modelschemas import ResourceType
+from bentoml._internal.cloud.schemas.modelschemas import UploadStatus
 from bentoml._internal.cloud.schemas.schemasv1 import BentoFullSchema
 from bentoml._internal.cloud.schemas.schemasv1 import BentoManifestSchema
 from bentoml._internal.cloud.schemas.schemasv1 import BentoRepositorySchema
@@ -42,9 +41,6 @@ from bentoml._internal.cloud.schemas.schemasv2 import (
 from bentoml._internal.cloud.schemas.schemasv2 import (
     UpdateDeploymentSchema as UpdateDeploymentSchemaV2,
 )
-
-if t.TYPE_CHECKING:
-    from unittest.mock import MagicMock
 
 
 @attr.define
@@ -80,7 +76,7 @@ def dummy_generate_deployment_schema(
         description="",
         version=bento_version,
         image_build_status=BentoImageBuildStatus.PENDING,
-        upload_status=BentoUploadStatus.SUCCESS,
+        upload_status=UploadStatus.SUCCESS,
         upload_finished_reason="",
         presigned_upload_url="",
         presigned_download_url="",
@@ -160,8 +156,8 @@ def dummy_generate_deployment_schema(
     )
 
 
-@pytest.fixture(name="rest_client", scope="function")
-def fixture_rest_client() -> RestApiClient:
+@pytest.fixture
+def mock_rest_client() -> RestApiClient:
     def dummy_create_deployment(
         create_schema: CreateDeploymentSchemaV2, cluster: str | None = None
     ):
@@ -256,14 +252,16 @@ def fixture_rest_client() -> RestApiClient:
             )
         ],
     )  # type: ignore
-
     return client
 
 
-@patch("bentoml._internal.cloud.deployment.get_rest_api_client")
-def test_create_deployment(mock_get_client: MagicMock, rest_client: RestApiClient):
-    mock_get_client.return_value = rest_client
-    deployment = Deployment.create(
+@pytest.fixture
+def deployment_api(mock_rest_client: RestApiClient) -> DeploymentAPI:
+    return DeploymentAPI(mock_rest_client)
+
+
+def test_create_deployment(deployment_api: DeploymentAPI):
+    deployment = deployment_api.create(
         deployment_config_params=DeploymentConfigParameters(
             cfg_dict={
                 "bento": "abc:123",
@@ -282,12 +280,8 @@ def test_create_deployment(mock_get_client: MagicMock, rest_client: RestApiClien
         )
 
 
-@patch("bentoml._internal.cloud.deployment.get_rest_api_client")
-def test_create_deployment_custom_standalone(
-    mock_get_client: MagicMock, rest_client: RestApiClient
-):
-    mock_get_client.return_value = rest_client
-    deployment = Deployment.create(
+def test_create_deployment_custom_standalone(deployment_api: DeploymentAPI):
+    deployment = deployment_api.create(
         deployment_config_params=DeploymentConfigParameters(
             cfg_dict={
                 "bento": "abc:123",
@@ -318,12 +312,8 @@ def test_create_deployment_custom_standalone(
         assert service.deployment_strategy == "RollingUpdate"
 
 
-@patch("bentoml._internal.cloud.deployment.get_rest_api_client")
-def test_create_deployment_scailing_only_min(
-    mock_get_client: MagicMock, rest_client: RestApiClient
-):
-    mock_get_client.return_value = rest_client
-    deployment = Deployment.create(
+def test_create_deployment_scailing_only_min(deployment_api: DeploymentAPI):
+    deployment = deployment_api.create(
         deployment_config_params=DeploymentConfigParameters(
             cfg_dict={
                 "bento": "abc:123",
@@ -347,12 +337,8 @@ def test_create_deployment_scailing_only_min(
         )
 
 
-@patch("bentoml._internal.cloud.deployment.get_rest_api_client")
-def test_create_deployment_scailing_only_max(
-    mock_get_client: MagicMock, rest_client: RestApiClient
-):
-    mock_get_client.return_value = rest_client
-    deployment = Deployment.create(
+def test_create_deployment_scailing_only_max(deployment_api: DeploymentAPI):
+    deployment = deployment_api.create(
         deployment_config_params=DeploymentConfigParameters(
             cfg_dict={
                 "bento": "abc:123",
@@ -372,16 +358,12 @@ def test_create_deployment_scailing_only_max(
     assert config.access_authorization is False
     for service in config.services.values():
         assert service.scaling == DeploymentTargetHPAConf(
-            min_replicas=1, max_replicas=3
+            min_replicas=None, max_replicas=3
         )
 
 
-@patch("bentoml._internal.cloud.deployment.get_rest_api_client")
-def test_create_deployment_config_dict(
-    mock_get_client: MagicMock, rest_client: RestApiClient
-):
-    mock_get_client.return_value = rest_client
-    deployment = Deployment.create(
+def test_create_deployment_config_dict(deployment_api: DeploymentAPI):
+    deployment = deployment_api.create(
         deployment_config_params=DeploymentConfigParameters(
             cfg_dict={
                 "bento": "abc:123",
@@ -414,15 +396,13 @@ def test_create_deployment_config_dict(
             },
         ),
         "preprocessing": DeploymentServiceConfig(
-            scaling=DeploymentTargetHPAConf(min_replicas=1, max_replicas=2)
+            scaling=DeploymentTargetHPAConf(min_replicas=None, max_replicas=2)
         ),
     }
 
 
-@patch("bentoml._internal.cloud.deployment.get_rest_api_client")
-def test_update_deployment(mock_get_client: MagicMock, rest_client: RestApiClient):
-    mock_get_client.return_value = rest_client
-    deployment = Deployment.update(
+def test_update_deployment(deployment_api: DeploymentAPI):
+    deployment = deployment_api.update(
         deployment_config_params=DeploymentConfigParameters(
             cfg_dict={
                 "name": "test",
@@ -452,12 +432,8 @@ def test_update_deployment(mock_get_client: MagicMock, rest_client: RestApiClien
         assert service.deployment_strategy == "Recreate"
 
 
-@patch("bentoml._internal.cloud.deployment.get_rest_api_client")
-def test_update_deployment_scaling_only_min(
-    mock_get_client: MagicMock, rest_client: RestApiClient
-):
-    mock_get_client.return_value = rest_client
-    deployment = Deployment.update(
+def test_update_deployment_scaling_only_min(deployment_api: DeploymentAPI):
+    deployment = deployment_api.update(
         deployment_config_params=DeploymentConfigParameters(
             cfg_dict={
                 "name": "test",
@@ -483,12 +459,8 @@ def test_update_deployment_scaling_only_min(
         assert service.deployment_strategy == "RollingUpdate"
 
 
-@patch("bentoml._internal.cloud.deployment.get_rest_api_client")
-def test_update_deployment_scaling_only_max(
-    mock_get_client: MagicMock, rest_client: RestApiClient
-):
-    mock_get_client.return_value = rest_client
-    deployment = Deployment.update(
+def test_update_deployment_scaling_only_max(deployment_api: DeploymentAPI):
+    deployment = deployment_api.update(
         deployment_config_params=DeploymentConfigParameters(
             cfg_dict={
                 "name": "test",
@@ -514,13 +486,9 @@ def test_update_deployment_scaling_only_max(
         assert service.deployment_strategy == "RollingUpdate"
 
 
-@patch("bentoml._internal.cloud.deployment.get_rest_api_client")
-def test_update_deployment_scaling_too_big_min(
-    mock_get_client: MagicMock, rest_client: RestApiClient
-):
-    mock_get_client.return_value = rest_client
+def test_update_deployment_scaling_too_big_min(deployment_api: DeploymentAPI):
     try:
-        Deployment.update(
+        deployment_api.update(
             deployment_config_params=DeploymentConfigParameters(
                 cfg_dict={
                     "name": "test",
@@ -538,12 +506,8 @@ def test_update_deployment_scaling_too_big_min(
         )
 
 
-@patch("bentoml._internal.cloud.deployment.get_rest_api_client")
-def test_update_deployment_distributed(
-    mock_get_client: MagicMock, rest_client: RestApiClient
-):
-    mock_get_client.return_value = rest_client
-    deployment = Deployment.update(
+def test_update_deployment_distributed(deployment_api: DeploymentAPI):
+    deployment = deployment_api.update(
         deployment_config_params=DeploymentConfigParameters(
             cfg_dict={
                 "name": "test-distributed",

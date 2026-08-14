@@ -7,6 +7,7 @@ import typing as t
 
 import click
 import click_option_group as cog
+import rich
 import yaml
 from rich.syntax import Syntax
 from rich.table import Table
@@ -24,7 +25,6 @@ if t.TYPE_CHECKING:
     from bentoml._internal.cloud import BentoCloudClient
     from bentoml._internal.container import DefaultBuilder
 
-    from .utils import SharedOptions
 
 BENTOML_FIGLET = """
 ██████╗ ███████╗███╗   ██╗████████╗ ██████╗ ███╗   ███╗██╗
@@ -34,6 +34,44 @@ BENTOML_FIGLET = """
 ██████╔╝███████╗██║ ╚████║   ██║   ╚██████╔╝██║ ╚═╝ ██║███████╗
 ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝ ╚═╝     ╚═╝╚══════╝
 """
+
+ALLOWED_PLATFORMS = [
+    "windows",
+    "linux",
+    "macos",
+    "x86_64-pc-windows-msvc",
+    "i686-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-musl",
+    "x86_64-manylinux_2_17",
+    "x86_64-manylinux_2_28",
+    "x86_64-manylinux_2_31",
+    "x86_64-manylinux_2_32",
+    "x86_64-manylinux_2_33",
+    "x86_64-manylinux_2_34",
+    "x86_64-manylinux_2_35",
+    "x86_64-manylinux_2_36",
+    "x86_64-manylinux_2_37",
+    "x86_64-manylinux_2_38",
+    "x86_64-manylinux_2_39",
+    "x86_64-manylinux_2_40",
+    "aarch64-manylinux_2_17",
+    "aarch64-manylinux_2_28",
+    "aarch64-manylinux_2_31",
+    "aarch64-manylinux_2_32",
+    "aarch64-manylinux_2_33",
+    "aarch64-manylinux_2_34",
+    "aarch64-manylinux_2_35",
+    "aarch64-manylinux_2_36",
+    "aarch64-manylinux_2_37",
+    "aarch64-manylinux_2_38",
+    "aarch64-manylinux_2_39",
+    "aarch64-manylinux_2_40",
+]
 
 
 def parse_delete_targets_argument_callback(
@@ -62,16 +100,14 @@ def parse_delete_targets_argument_callback(
 def bento_management_commands() -> click.Group:
     import bentoml
     from bentoml import Tag
-    from bentoml._internal.bento.bento import DEFAULT_BENTO_BUILD_FILE
-    from bentoml._internal.bento.bento import Bento
-    from bentoml._internal.bento.build_config import BentoBuildConfig
     from bentoml._internal.configuration import get_quiet_mode
     from bentoml._internal.configuration.containers import BentoMLContainer
     from bentoml._internal.utils import human_readable_size
-    from bentoml._internal.utils import resolve_user_filepath
-    from bentoml._internal.utils import rich_console as console
+    from bentoml.bentos import build_bentofile
     from bentoml.bentos import import_bento
-    from bentoml_cli.utils import BentoMLCommandGroup
+
+    from .utils import BentoMLCommandGroup
+    from .utils import build_args_option
 
     @click.group(cls=BentoMLCommandGroup)
     def bentos():
@@ -101,13 +137,13 @@ def bento_management_commands() -> click.Group:
         bento = bento_store.get(bento_tag)
 
         if output == "path":
-            console.print(bento.path)
+            rich.print(bento.path)
         elif output == "json":
             info = json.dumps(bento.info.to_dict(), indent=2, default=str)
-            console.print_json(info)
+            rich.print_json(info)
         else:
             info = yaml.dump(bento.info.to_dict(), indent=2, sort_keys=False)
-            console.print(Syntax(info, "yaml", background_color="default"))
+            rich.print(Syntax(info, "yaml", background_color="default"))
 
     @bentos.command(name="list")
     @click.argument("bento_name", type=click.STRING, required=False)
@@ -151,10 +187,10 @@ def bento_management_commands() -> click.Group:
 
         if output == "json":
             info = json.dumps(res, indent=2)
-            console.print(info)
+            rich.print(info)
         elif output == "yaml":
             info = t.cast(str, yaml.safe_dump(res, indent=2))
-            console.print(Syntax(info, "yaml", background_color="default"))
+            rich.print(Syntax(info, "yaml", background_color="default"))
         else:
             table = Table(box=None)
             table.add_column("Tag")
@@ -168,7 +204,7 @@ def bento_management_commands() -> click.Group:
                     bento["model_size"],
                     bento["creation_time"],
                 )
-            console.print(table)
+            rich.print(table)
 
     @bentos.command()
     @click.argument(
@@ -217,7 +253,7 @@ def bento_management_commands() -> click.Group:
 
                 if delete_confirmed:
                     bento_store.delete(bento.tag)
-                    click.echo(f"{bento} deleted.")
+                    rich.print(f"{bento} deleted.")
 
         for target in delete_targets:
             delete_target(target)
@@ -255,7 +291,7 @@ def bento_management_commands() -> click.Group:
         """
         bento = bento_store.get(bento_tag)
         out_path = bento.export(out_path)
-        click.echo(f"{bento} exported to {out_path}.")
+        rich.print(f"{bento} exported to {out_path}.")
 
     @bentos.command(name="import")
     @click.argument("bento_path", type=click.STRING)
@@ -272,7 +308,7 @@ def bento_management_commands() -> click.Group:
             bentoml import s3://mybucket/bentos/my_bento.bento
         """
         bento = import_bento(bento_path)
-        click.echo(f"{bento} imported.")
+        rich.print(f"{bento} imported.")
 
     @bentos.command()
     @click.argument("bento_tag", type=click.STRING)
@@ -283,18 +319,16 @@ def bento_management_commands() -> click.Group:
         default=False,
         help="Force pull from remote Bento store to local and overwrite even if it already exists in local",
     )
-    @click.pass_obj
+    @click.option("--with-models", is_flag=True, default=False, help="Pull models too")
     @inject
     def pull(
-        shared_options: SharedOptions,
         bento_tag: str,
         force: bool,
+        with_models: bool,
         cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
     ) -> None:  # type: ignore (not accessed)
         """Pull Bento from a remote Bento store server."""
-        cloud_client.pull_bento(
-            bento_tag, force=force, context=shared_options.cloud_context
-        )
+        cloud_client.bento.pull(bento_tag, force=force, with_models=with_models)
 
     @bentos.command()
     @click.argument("bento_tag", type=click.STRING)
@@ -311,10 +345,8 @@ def bento_management_commands() -> click.Group:
         default=10,
         help="Number of threads to use for upload",
     )
-    @click.pass_obj
     @inject
     def push(
-        shared_options: SharedOptions,
         bento_tag: str,
         force: bool,
         threads: int,
@@ -325,27 +357,27 @@ def bento_management_commands() -> click.Group:
         bento_obj = bento_store.get(bento_tag)
         if not bento_obj:
             raise click.ClickException(f"Bento {bento_tag} not found in local store")
-        cloud_client.push_bento(
-            bento_obj,
-            force=force,
-            threads=threads,
-            context=shared_options.cloud_context,
-        )
+        cloud_client.bento.push(bento_obj, force=force, threads=threads)
 
     @bentos.command()
     @click.argument("build_ctx", type=click.Path(), default=".")
     @click.option(
-        "-f",
-        "--bentofile",
-        type=click.STRING,
-        default=DEFAULT_BENTO_BUILD_FILE,
-        help="Path to bentofile. Default to 'bentofile.yaml'",
+        "-f", "--bentofile", help="Path to bentofile. Default to 'bentofile.yaml'"
     )
+    @click.option("--name", help="Bento name")
     @click.option(
         "--version",
         type=click.STRING,
         default=None,
         help="Bento version. By default the version will be generated.",
+    )
+    @click.option(
+        "--label",
+        "labels",
+        type=click.STRING,
+        multiple=True,
+        help="(multiple)Bento labels",
+        metavar="KEY=VALUE",
     )
     @click.option(
         "-o",
@@ -374,20 +406,25 @@ def bento_management_commands() -> click.Group:
         "--force", is_flag=True, default=False, help="Forced push to BentoCloud"
     )
     @click.option("--threads", default=10, help="Number of threads to use for upload")
-    @click.pass_context
-    @inject
+    @click.option(
+        "--platform",
+        default=None,
+        help="Platform to build for",
+        type=click.Choice(ALLOWED_PLATFORMS),
+    )
+    @build_args_option
     def build(  # type: ignore (not accessed)
-        ctx: click.Context,
         build_ctx: str,
-        bentofile: str,
-        version: str,
+        bentofile: str | None,
+        name: str | None,
+        version: str | None,
+        labels: tuple[str, ...],
         output: t.Literal["tag", "default"],
         push: bool,
         force: bool,
         threads: int,
         containerize: bool,
-        _bento_store: BentoStore = Provide[BentoMLContainer.bento_store],
-        _cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
+        platform: str | None,
     ):
         """Build a new Bento from current directory."""
         from bentoml._internal.configuration import set_quiet_mode
@@ -397,19 +434,25 @@ def bento_management_commands() -> click.Group:
             set_quiet_mode()
             configure_logging()
 
-        try:
-            bentofile = resolve_user_filepath(bentofile, build_ctx)
-        except FileNotFoundError:
-            raise click.ClickException(f'bentofile "{bentofile}" not found')
+        labels_dict: dict[str, t.Any] = {}
+        for label in labels:
+            key, label_value = label.split("=", 1)
+            labels_dict[key] = label_value
 
-        with open(bentofile, "r", encoding="utf-8") as f:
-            build_config = BentoBuildConfig.from_yaml(f)
+        service: str | None = None
+        if ":" in build_ctx or not os.path.isdir(build_ctx):
+            service = build_ctx
+            build_ctx = "."
 
-        bento = Bento.create(
-            build_config=build_config,
+        bento = build_bentofile(
+            bentofile,
+            service=service,
+            name=name,
             version=version,
+            labels=labels_dict or None,
             build_ctx=build_ctx,
-        ).save(_bento_store)
+            platform=platform,
+        )
 
         containerize_cmd = f"bentoml containerize {bento.tag}"
         push_cmd = f"bentoml push {bento.tag}"
@@ -417,11 +460,11 @@ def bento_management_commands() -> click.Group:
         # NOTE: Don't remove the return statement here, since we will need this
         # for usage stats collection if users are opt-in.
         if output == "tag":
-            click.echo(f"__tag__:{bento.tag}")
+            rich.print(f"__tag__:{bento.tag}")
         else:
             if not get_quiet_mode():
-                click.echo(BENTOML_FIGLET)
-                click.secho(f"Successfully built {bento}.", fg="green")
+                rich.print(BENTOML_FIGLET)
+                rich.print(f"[green]Successfully built {bento}.")
                 next_steps = [
                     f"\n\n* Deploy to BentoCloud:\n    $ bentoml deploy {bento.tag} -n ${{DEPLOYMENT_NAME}}",
                     "\n\n* Update an existing deployment on BentoCloud:\n"
@@ -439,19 +482,12 @@ def bento_management_commands() -> click.Group:
                     )
 
                 if next_steps:
-                    click.secho(
-                        "\nNext steps:" + "".join(next_steps),
-                        fg="blue",
-                    )
+                    rich.print(f"\n[blue]Next steps: {''.join(next_steps)}[/]")
         if push:
             if not get_quiet_mode():
-                click.secho(f"\nPushing {bento} to BentoCloud...", fg="magenta")
-            _cloud_client.push_bento(
-                bento,
-                force=force,
-                threads=threads,
-                context=t.cast("SharedOptions", ctx.obj).cloud_context,
-            )
+                rich.print(f"\n[magenta]Pushing {bento} to BentoCloud...[/]")
+            cloud_client = BentoMLContainer.bentocloud_client.get()
+            cloud_client.bento.push(bento, force=force, threads=threads)
         elif containerize:
             backend: DefaultBuilder = t.cast(
                 "DefaultBuilder", os.getenv("BENTOML_CONTAINERIZE_BACKEND", "docker")

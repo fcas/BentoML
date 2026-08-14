@@ -12,12 +12,12 @@ import pytest
 from pytest import MonkeyPatch
 
 import bentoml
-from bentoml._internal.configuration import BENTOML_VERSION
+from bentoml._internal.cloud import BentoCloudClient
 from bentoml._internal.configuration import clean_bentoml_version
 from bentoml._internal.configuration.containers import BentoMLContainer
 from bentoml._internal.models import ModelContext
-from bentoml._internal.utils import LazyLoader
-from bentoml._internal.utils import validate_or_create_dir
+from bentoml._internal.utils.filesystem import validate_or_create_dir
+from bentoml._internal.utils.lazy_loader import LazyLoader
 
 if TYPE_CHECKING:
     import numpy as np
@@ -46,7 +46,7 @@ _RUN_GRPC_TESTS_MARKER = "--run-grpc-tests"
 
 @pytest.mark.tryfirst
 def pytest_report_header(config: Config) -> list[str]:
-    return [f"bentoml: version={clean_bentoml_version(BENTOML_VERSION)}"]
+    return [f"bentoml: version={clean_bentoml_version()}"]
 
 
 @pytest.hookimpl
@@ -195,6 +195,7 @@ def _setup_test_directory() -> tuple[str, str]:
     BentoMLContainer.model_store_dir.set(models)
     BentoMLContainer.tmp_bento_store_dir.set(tmp_bentos)
     BentoMLContainer.prometheus_multiproc_dir.set(multiproc_dir)
+    BentoMLContainer.bentocloud_client.set(BentoCloudClient(""))
     return bentoml_home, multiproc_dir
 
 
@@ -221,7 +222,6 @@ def pytest_sessionstart(session: Session) -> None:
         session,
         ("PROMETHEUS_MULTIPROC_DIR", _PYTEST_MULTIPROC_DIR),
         ("BENTOML_BUNDLE_LOCAL_BUILD", "True"),
-        ("SETUPTOOLS_USE_DISTUTILS", "stdlib"),
         ("__BENTOML_DEBUG_USAGE", "False"),
         ("BENTOML_DO_NOT_TRACK", "True"),
     )
@@ -246,7 +246,6 @@ def pytest_sessionfinish(session: Session, exitstatus: int | ExitCode) -> None:
         session,
         "BENTOML_BUNDLE_LOCAL_BUILD",
         "PROMETHEUS_MULTIPROC_DIR",
-        "SETUPTOOLS_USE_DISTUTILS",
         "__BENTOML_DEBUG_USAGE",
         "BENTOML_DO_NOT_TRACK",
     )

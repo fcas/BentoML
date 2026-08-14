@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from bentoml._internal.utils import LazyLoader
+from bentoml._internal.utils.lazy_loader import LazyLoader
 from bentoml.grpc.interceptors.access import AccessLogServerInterceptor
 from bentoml.grpc.interceptors.opentelemetry import AsyncOpenTelemetryServerInterceptor
 from bentoml.grpc.utils import import_generated_stubs
@@ -28,13 +28,13 @@ if TYPE_CHECKING:
     from google.protobuf import wrappers_pb2
     from grpc import aio
 
-    from bentoml import Service
     from bentoml.grpc.types import AsyncHandlerMethod
     from bentoml.grpc.types import BentoServicerContext
     from bentoml.grpc.types import HandlerCallDetails
     from bentoml.grpc.types import Request
     from bentoml.grpc.types import Response
     from bentoml.grpc.types import RpcMethodHandler
+    from bentoml.legacy import Service
 else:
     grpc, aio = import_grpc()
     wrappers_pb2 = LazyLoader("wrappers_pb2", globals(), "google.protobuf.wrappers_pb2")

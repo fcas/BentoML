@@ -85,7 +85,6 @@ class TraceRecordFilter(logging.Filter):
 
 SERVER_LOGGING_CONFIG: dict[str, t.Any] = {
     "version": 1,
-    "disable_existing_loggers": True,
     "formatters": {
         "traced": {
             "format": TRACED_LOG_FORMAT,
@@ -106,6 +105,16 @@ SERVER_LOGGING_CONFIG: dict[str, t.Any] = {
             "level": logging.INFO,
             "handlers": ["tracehandler"],
             "propagate": False,
+        },
+        "uvicorn.error": {
+            "level": logging.WARNING,
+            "handlers": ["tracehandler"],
+            "propagate": True,
+        },
+        "circus": {
+            "level": logging.WARNING,
+            "handlers": ["tracehandler"],
+            "propagate": True,
         },
     },
     "root": {
@@ -146,11 +155,14 @@ def _component_name():
 def configure_server_logging():
     if get_quiet_mode():
         SERVER_LOGGING_CONFIG["loggers"]["bentoml"]["level"] = logging.ERROR
+        SERVER_LOGGING_CONFIG["loggers"]["circus"]["level"] = logging.ERROR
         SERVER_LOGGING_CONFIG["root"]["level"] = logging.ERROR
     elif get_debug_mode():
         SERVER_LOGGING_CONFIG["loggers"]["bentoml"]["level"] = logging.DEBUG
+        SERVER_LOGGING_CONFIG["loggers"]["circus"]["level"] = logging.DEBUG
         SERVER_LOGGING_CONFIG["root"]["level"] = logging.DEBUG
     else:
         SERVER_LOGGING_CONFIG["loggers"]["bentoml"]["level"] = logging.INFO
+        SERVER_LOGGING_CONFIG["loggers"]["circus"]["level"] = logging.WARNING
         SERVER_LOGGING_CONFIG["root"]["level"] = logging.WARNING
     logging.config.dictConfig(SERVER_LOGGING_CONFIG)

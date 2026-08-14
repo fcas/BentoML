@@ -7,14 +7,16 @@ import os
 import re
 import time
 import typing as t
+from importlib.metadata import entry_points
 
-import attr
 import click
 import click_option_group as cog
 from click import ClickException
 from click.exceptions import UsageError
 
 if t.TYPE_CHECKING:
+    from importlib.metadata import EntryPoint
+
     from click import Command
     from click import Context
     from click import HelpFormatter
@@ -22,8 +24,9 @@ if t.TYPE_CHECKING:
     from click import Parameter
 
     P = t.ParamSpec("P")
+    R = t.TypeVar("R")
 
-    F = t.Callable[P, t.Any]
+    F = t.Callable[P, R]
 
     class ClickFunctionWrapper(t.Protocol[P]):
         __name__: str
@@ -42,14 +45,14 @@ logger = logging.getLogger("bentoml")
 
 
 def kwargs_transformers(
-    f: F[t.Any] | None = None,
+    f: F[P, R] | None = None,
     *,
-    transformer: F[t.Any],
+    transformer: F[P, R],
     pass_click_context: bool = False,
-) -> F[t.Any]:
-    def decorator(_f: F[t.Any]) -> t.Callable[P, t.Any]:
+) -> F[P, R]:
+    def decorator(_f: F[P, R]) -> F[P, R]:
         @functools.wraps(_f)
-        def wrapper(*args: P.args, **kwargs: P.kwargs) -> t.Any:
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             transformed = {k: transformer(v) for k, v in kwargs.items()}
             if pass_click_context:
                 return _f(click.get_current_context(), *args, **transformed)
@@ -74,7 +77,7 @@ def _validate_docker_tag(tag: str) -> str:
         r"""
         ^(
         [a-z0-9]+      # alphanumeric
-        (.|_{1,2}|-+)? # seperators
+        (.|_{1,2}|-+)? # separators
         )*$
         """,
         re.VERBOSE,
@@ -188,17 +191,6 @@ def opt_callback(ctx: Context, param: Parameter, value: ClickParamType):
     return value
 
 
-@attr.define
-class SharedOptions:
-    """This is the click.Context object that will be used in BentoML CLI."""
-
-    cloud_context: str | None = attr.field(default=None)
-    do_not_track: bool = attr.field(default=False)
-
-    def with_options(self, **attrs: t.Any) -> t.Any:
-        return attr.evolve(self, **attrs)
-
-
 def setup_verbosity(ctx: Context, param: Parameter, value: int) -> int:
     from bentoml._internal.configuration import set_verbosity
     from bentoml._internal.log import configure_logging
@@ -209,16 +201,19 @@ def setup_verbosity(ctx: Context, param: Parameter, value: int) -> int:
 
 
 def setup_track(ctx: Context, param: Parameter, value: bool) -> bool:
+    from bentoml._internal.utils.analytics import BENTOML_DO_NOT_TRACK
+
     if value:
-        obj = ctx.ensure_object(SharedOptions)
-        obj.do_not_track = True
+        os.environ[BENTOML_DO_NOT_TRACK] = "True"
     return value
 
 
 def setup_cloud_client(ctx: Context, param: Parameter, value: str | None) -> str | None:
+    from bentoml._internal.configuration.containers import BentoMLContainer
+
     if value:
-        obj = ctx.ensure_object(SharedOptions)
-        obj.cloud_context = value
+        BentoMLContainer.cloud_context.set(value)
+        os.environ["BENTOML_CLOUD_CONTEXT"] = value
     return value
 
 
@@ -305,18 +300,16 @@ class BentoMLCommandGroup(click.Group):
     def bentoml_track_usage(
         func: F[P], cmd_group: click.Group, name: str | None
     ) -> F[P]:
-        from bentoml._internal.utils.analytics import BENTOML_DO_NOT_TRACK
         from bentoml._internal.utils.analytics import CliEvent
         from bentoml._internal.utils.analytics import cli_events_map
         from bentoml._internal.utils.analytics import track
+        from bentoml._internal.utils.analytics import usage_stats
 
         command_name = name or func.__name__
 
-        @click.pass_context
-        def wrapper(ctx: Context, *args: P.args, **kwargs: P.kwargs) -> t.Any:
-            options = ctx.ensure_object(SharedOptions)
-            if options.do_not_track:
-                os.environ[BENTOML_DO_NOT_TRACK] = str(True)
+        @functools.wraps(func)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> t.Any:
+            if usage_stats.do_not_track():
                 return func(*args, **kwargs)
 
             start_time = time.time_ns()
@@ -387,10 +380,6 @@ class BentoMLCommandGroup(click.Group):
         self._aliases: dict[str, str] = {}
 
     def add_subcommands(self, group: click.Group) -> None:
-        if not isinstance(group, click.MultiCommand):
-            raise TypeError(
-                "BentoMLCommandGroup.add_subcommands only accepts click.MultiCommand"
-            )
         if isinstance(group, BentoMLCommandGroup):
             # Common wrappers are already applied, call the super() method
             for name, cmd in group.commands.items():
@@ -403,8 +392,9 @@ class BentoMLCommandGroup(click.Group):
 
     def add_command(self, cmd: Command, name: str | None = None) -> None:
         assert cmd.callback is not None
+        callback = cmd.callback
         callback = BentoMLCommandGroup.bentoml_track_usage(
-            cmd.callback, self, name=cmd.name
+            callback, self, name=cmd.name
         )
         callback = BentoMLCommandGroup.raise_click_exception(
             callback, self, name=cmd.name
@@ -483,3 +473,64 @@ def is_valid_bento_tag(value: str) -> bool:
 
 def is_valid_bento_name(value: str) -> bool:
     return re.match(r"^[A-Za-z_0-9]*$", value) is not None
+
+
+def get_entry_points(group: str) -> t.Iterable[EntryPoint]:
+    """A compatible version of importlib.metadata.entry_points for Python < 3.10"""
+    try:
+        return entry_points(group=group)
+    except TypeError:
+        # For Python < 3.10, entry_points() does not accept group argument
+        return entry_points().get(group, [])
+
+
+def set_build_args(ctx: Context, param: Parameter, value: str | tuple[str]) -> None:
+    from bentoml._internal.utils.args import set_arguments
+
+    if isinstance(value, str):
+        value = (value,)
+    arguments: dict[str, str] = {}
+    for item in value:
+        key, has_equal, val = item.partition("=")
+        if not has_equal:
+            raise click.BadParameter(
+                f"Invalid argument format: {item}. Must be in the form of key=value"
+            )
+        arguments[key] = val
+
+    set_arguments(arguments, override=False)
+
+
+def set_build_args_from_file(ctx: Context, param: Parameter, value: str) -> None:
+    import yaml
+
+    from bentoml._internal.utils.args import set_arguments
+
+    if not value:
+        return
+
+    with open(value) as f:
+        try:
+            data = yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            raise click.BadParameter(f"Invalid YAML file: {value}") from e
+    set_arguments(data, override=False)
+
+
+def build_args_option(f: t.Callable[..., t.Any]):
+    return click.option(
+        "--arg",
+        multiple=True,
+        help="Bento arguments in the form of key1=value1[,key2=value2...] pairs, can be specified multiple times",
+        expose_value=False,
+        metavar="KEY=VALUE",
+        callback=set_build_args,
+    )(
+        click.option(
+            "--arg-file",
+            type=click.Path(exists=True, dir_okay=False),
+            help="Path to a YAML file containing Bento arguments.",
+            expose_value=False,
+            callback=set_build_args_from_file,
+        )(f)
+    )

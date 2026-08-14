@@ -4,11 +4,12 @@ import time
 import typing as t
 from typing import TYPE_CHECKING
 
+import prometheus_client
 from context_server_interceptor import AsyncContextInterceptor
 from pydantic import BaseModel
 
 import bentoml
-from bentoml._internal.utils import LazyLoader
+from bentoml._internal.utils.lazy_loader import LazyLoader
 from bentoml._internal.utils.metrics import exponential_buckets
 from bentoml.io import JSON
 from bentoml.io import File
@@ -28,11 +29,12 @@ if TYPE_CHECKING:
     from bentoml._internal.runner.runner import RunnerMethod
     from bentoml._internal.types import FileLike
     from bentoml._internal.types import JSONSerializable
-    from bentoml.picklable_model import get_runnable
 
-    RunnableImpl = get_runnable(bentoml.picklable_model.get("py_model.case-1.grpc.e2e"))
+    RunnableImpl = bentoml.picklable_model.get_runnable(
+        bentoml.picklable_model.get("py_model.case-1.grpc.e2e")
+    )
 
-    class PythonModelRunner(bentoml.Runner):
+    class PythonModelRunner(bentoml.legacy.Runner):
         predict_file: RunnerMethod[RunnableImpl, [list[FileLike[bytes]]], list[bytes]]
         echo_json: RunnerMethod[
             RunnableImpl, [list[JSONSerializable]], list[JSONSerializable]
@@ -61,7 +63,7 @@ py_model = t.cast(
     bentoml.picklable_model.get("py_model.case-1.grpc.e2e").to_runner(),
 )
 
-svc = bentoml.Service(name="general_grpc_service.case-1.e2e", runners=[py_model])
+svc = bentoml.legacy.Service(name="general_grpc_service.case-1.e2e", runners=[py_model])
 
 svc.add_grpc_interceptor(AsyncContextInterceptor, usage="NLP", accuracy_score=0.8247)
 
@@ -171,7 +173,7 @@ async def echo_image(f: PIL.Image.Image) -> NDArray[t.Any]:
     return np.array(f)
 
 
-histogram = bentoml.metrics.Histogram(
+histogram = prometheus_client.Histogram(
     name="inference_latency",
     documentation="Inference latency in seconds",
     labelnames=["model_name", "model_version"],
@@ -199,9 +201,12 @@ async def predict_multi_images(original: Image, compared: Image):
 
 @svc.api(input=bentoml.io.Text(), output=bentoml.io.Text())
 def ensure_metrics_are_registered(_: str) -> None:
+    from prometheus_client import generate_latest
+    from prometheus_client.parser import text_string_to_metric_families
+
     histograms = [
         m.name
-        for m in bentoml.metrics.text_string_to_metric_families()
+        for m in text_string_to_metric_families(generate_latest().decode())
         if m.type == "histogram"
     ]
     assert "inference_latency" in histograms

@@ -18,11 +18,11 @@ from ...exceptions import MissingDependencyException
 from ...exceptions import NotFound
 from ..models.model import Model
 from ..models.model import ModelContext
-from ..models.model import ModelOptions
+from ..models.model import ModelOptions as BaseModelOptions
 from ..models.model import ModelSignature
 from ..tag import Tag
 from ..types import LazyType
-from ..utils import LazyLoader
+from ..utils.lazy_loader import LazyLoader
 from ..utils.pkg import get_pkg_version
 from ..utils.pkg import pkg_version_info
 from .utils.transformers import extract_commit_hash
@@ -170,7 +170,7 @@ def _autoclass_converter(
 
 
 @attr.define
-class TransformersOptions(ModelOptions):
+class ModelOptions(BaseModelOptions):
     """Options for the Transformers model."""
 
     task: str = attr.field(factory=str, validator=attr.validators.instance_of(str))
@@ -240,7 +240,7 @@ class TransformersOptions(ModelOptions):
         return task_impl
 
     @classmethod
-    def from_task(cls, task: str, definition: TaskDefinition) -> TransformersOptions:
+    def from_task(cls, task: str, definition: TaskDefinition) -> ModelOptions:
         return cls(
             task=task,
             tf=definition.get("tf", None),  # type: ignore (handle by cattrs converter)
@@ -319,7 +319,7 @@ def register_pipeline(
     default: DefaultMapping | None = None,
     type: str | None = None,
 ):
-    task_impl = TransformersOptions.process_task_mapping(impl, pt, tf, default, type)
+    task_impl = ModelOptions.process_task_mapping(impl, pt, tf, default, type)
 
     if HAS_PIPELINE_REGISTRY:
         from transformers.pipelines import PIPELINE_REGISTRY
@@ -399,7 +399,7 @@ def load_model(bento_model: str | Tag | Model, *args: t.Any, **kwargs: t.Any) ->
             f"Model {bento_model.tag} was saved with module {bento_model.info.module}, not loading with {MODULE_NAME}."
         )
 
-    options = t.cast(TransformersOptions, bento_model.info.options)
+    options = t.cast(ModelOptions, bento_model.info.options)
     api_version = bento_model.info.api_version
     task = options.task
     pipeline: transformers.Pipeline | None = None
@@ -453,9 +453,9 @@ def load_model(bento_model: str | Tag | Model, *args: t.Any, **kwargs: t.Any) ->
 
         kwargs.setdefault("pipeline_class", pipeline.__class__ if pipeline else None)
 
-        assert (
-            task in get_supported_tasks()
-        ), f"Task '{task}' is not a valid task for pipeline (available: {get_supported_tasks()})."
+        assert task in get_supported_tasks(), (
+            f"Task '{task}' is not a valid task for pipeline (available: {get_supported_tasks()})."
+        )
 
         return (
             transformers.pipeline(task=task, model=bento_model.path, **kwargs)
@@ -474,9 +474,9 @@ def load_model(bento_model: str | Tag | Model, *args: t.Any, **kwargs: t.Any) ->
                 protocol: PreTrainedProtocol = cloudpickle.load(f)
             return protocol.from_pretrained(bento_model.path, *args, **kwargs)
         else:
-            assert (
-                len(args) == 0
-            ), "Positional args are not supported for pipeline. Make sure to only use kwargs instead."
+            assert len(args) == 0, (
+                "Positional args are not supported for pipeline. Make sure to only use kwargs instead."
+            )
             with open(bento_model.path_of(PIPELINE_PICKLE_NAME), "rb") as f:
                 pipeline_class: type[transformers.Pipeline] = cloudpickle.load(f)
 
@@ -504,9 +504,9 @@ def load_model(bento_model: str | Tag | Model, *args: t.Any, **kwargs: t.Any) ->
 
             kwargs.setdefault("pipeline_class", pipeline_class)
 
-            assert (
-                task in get_supported_tasks()
-            ), f"Task '{task}' is not a valid task for pipeline (available: {get_supported_tasks()})."
+            assert task in get_supported_tasks(), (
+                f"Task '{task}' is not a valid task for pipeline (available: {get_supported_tasks()})."
+            )
 
             kwargs.update(options.kwargs)
             if len(kwargs) > 0:
@@ -860,7 +860,9 @@ def import_model(
     pretrained = t.cast("PreTrainedProtocol", model)
     assert all(
         hasattr(pretrained, defn) for defn in ("save_pretrained", "from_pretrained")
-    ), f"'pretrained={pretrained}' is not a valid Transformers object. It must have 'save_pretrained' and 'from_pretrained' methods."
+    ), (
+        f"'pretrained={pretrained}' is not a valid Transformers object. It must have 'save_pretrained' and 'from_pretrained' methods."
+    )
     if metadata is None:
         metadata = {}
 
@@ -898,7 +900,7 @@ def import_model(
         api_version=API_VERSION,
         signatures=signatures,
         labels=labels,
-        options=TransformersOptions(),
+        options=ModelOptions(),
         custom_objects=custom_objects,
         external_modules=external_modules,
         metadata=metadata,
@@ -963,7 +965,7 @@ def save_model(
                             }
 
                         See module `src/transformers/pipelines/__init__.py <https://github.com/huggingface/transformers/blob/main/src/transformers/pipelines/__init__.py#L129>`_ for more details.
-        signatures: Methods to expose for running inference on the target model. Signatures are used for creating :obj:`~bentoml.Runner` instances when serving model with :obj:`~bentoml.Service`
+        signatures: Methods to expose for running inference on the target model. Signatures are used for creating :obj:`~bentoml.legacy.Runner` instances when serving model with :obj:`~bentoml.legacy.Service`
         labels: User-defined labels for managing models, e.g. ``team=nlp``, ``stage=dev``.
         custom_objects: Custom objects to be saved with the model. An example is ``{"my-normalizer": normalizer}``.
 
@@ -1001,9 +1003,9 @@ def save_model(
         )
         pretrained_or_pipeline = pipeline
 
-    assert (
-        pretrained_or_pipeline is not None
-    ), "Please provide a pipeline or a pretrained object as a second argument."
+    assert pretrained_or_pipeline is not None, (
+        "Please provide a pipeline or a pretrained object as a second argument."
+    )
 
     # The below API are introduced since 4.18
     if pkg_version_info("transformers")[:2] >= (4, 18):
@@ -1074,7 +1076,7 @@ def save_model(
             assert "impl" in task_definition, "'task_definition' requires 'impl' key."
 
             impl = task_definition["impl"]
-            if type(pipeline_) != impl:
+            if isinstance(pipeline_, impl):
                 raise BentoMLException(
                     f"Argument 'pipeline' is not an instance of {impl}. It is an instance of {type(pipeline_)}."
                 )
@@ -1087,13 +1089,13 @@ def save_model(
                     task_name,
                 )
 
-            assert (
-                task_name in get_supported_tasks()
-            ), f"Task '{task_name}' failed to register into pipeline registry."
+            assert task_name in get_supported_tasks(), (
+                f"Task '{task_name}' failed to register into pipeline registry."
+            )
         else:
-            assert (
-                task_definition is None
-            ), "'task_definition' must be None if 'task_name' is not provided."
+            assert task_definition is None, (
+                "'task_definition' must be None if 'task_name' is not provided."
+            )
 
             # if task_name is None, then we derive the task from pipeline.task
             options_args = t.cast(
@@ -1107,7 +1109,7 @@ def save_model(
             api_version=API_VERSION,
             labels=labels,
             context=context,
-            options=TransformersOptions.from_task(*options_args),
+            options=ModelOptions.from_task(*options_args),
             signatures=signatures,
             custom_objects=custom_objects,
             external_modules=external_modules,
@@ -1124,7 +1126,9 @@ def save_model(
         pretrained = t.cast("PreTrainedProtocol", pretrained_or_pipeline)
         assert all(
             hasattr(pretrained, defn) for defn in ("save_pretrained", "from_pretrained")
-        ), f"'pretrained={pretrained}' is not a valid Transformers object. It must have 'save_pretrained' and 'from_pretrained' methods."
+        ), (
+            f"'pretrained={pretrained}' is not a valid Transformers object. It must have 'save_pretrained' and 'from_pretrained' methods."
+        )
         if metadata is None:
             metadata = {}
 
@@ -1150,7 +1154,7 @@ def save_model(
             api_version=API_VERSION,
             labels=labels,
             context=context,
-            options=TransformersOptions(),
+            options=ModelOptions(),
             signatures=signatures,
             custom_objects=custom_objects,
             external_modules=external_modules,
@@ -1163,12 +1167,12 @@ def save_model(
             return bento_model
 
 
-def get_runnable(bento_model: bentoml.Model) -> type[bentoml.Runnable]:
+def get_runnable(bento_model: bentoml.Model) -> type[bentoml.legacy.Runnable]:
     """
     Private API: use :obj:`~bentoml.Model.to_runnable` instead.
     """
 
-    class TransformersRunnable(bentoml.Runnable):
+    class TransformersRunnable(bentoml.legacy.Runnable):
         SUPPORTED_RESOURCES = ("nvidia.com/gpu", "cpu")
         SUPPORTS_CPU_MULTI_THREADING = True
 

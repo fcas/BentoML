@@ -35,7 +35,7 @@ try:
     from diffusers.utils.import_utils import is_xformers_available
 except ImportError:  # pragma: no cover
     raise MissingDependencyException(
-        "'diffusers' and 'transformers' is required in order to use module 'bentoml.diffusers', install diffusers and its dependencies with 'pip install --upgrade diffusers transformers accelerate'. For more information, refer to https://github.com/huggingface/diffusers",
+        "'diffusers' and 'transformers' are required in order to use module 'bentoml.diffusers', install diffusers and its dependencies with 'pip install --upgrade diffusers transformers accelerate'. For more information, refer to https://github.com/huggingface/diffusers",
     )
 
 
@@ -51,7 +51,7 @@ TextualInversionOptionType = t.Union[str, t.Dict[str, str]]
 
 
 @attr.define
-class DiffusersOptions(PartialKwargsModelOptions):
+class ModelOptions(PartialKwargsModelOptions):
     """Options for the diffusers model."""
 
     pipeline_class: str | type[diffusers.DiffusionPipeline] | None = None
@@ -494,7 +494,7 @@ def import_model(
     if variant:
         options_dict["variant"] = variant
 
-    options = DiffusersOptions(**options_dict) if options_dict else None
+    options = ModelOptions(**options_dict) if options_dict else None
 
     if os.path.isdir(model_name_or_path):
         src_dir = model_name_or_path
@@ -638,12 +638,12 @@ def save_model(
         return bento_model
 
 
-def get_runnable(bento_model: bentoml.Model) -> t.Type[bentoml.Runnable]:
+def get_runnable(bento_model: bentoml.Model) -> t.Type[bentoml.legacy.Runnable]:
     """
     Private API: use :obj:`~bentoml.Model.to_runnable` instead.
     """
 
-    bento_options = t.cast(DiffusersOptions, bento_model.info.options)
+    bento_options = t.cast(ModelOptions, bento_model.info.options)
     partial_kwargs: dict[str, t.Any] = bento_options.partial_kwargs  # type: ignore
     pipeline_class: str | type[diffusers.DiffusionPipeline] = (
         bento_options.pipeline_class or diffusers.DiffusionPipeline
@@ -699,7 +699,7 @@ def get_runnable(bento_model: bentoml.Model) -> t.Type[bentoml.Runnable]:
             "Try using `bento_model.with_options(pipeline_class=diffusers.StableDiffusionPipeline) to specify the pipeline's class"
         )
 
-    class DiffusersRunnable(bentoml.Runnable):
+    class DiffusersRunnable(bentoml.legacy.Runnable):
         SUPPORTED_RESOURCES = ("nvidia.com/gpu", "cpu")
         SUPPORTS_CPU_MULTI_THREADING = True
 
@@ -742,7 +742,7 @@ def get_runnable(bento_model: bentoml.Model) -> t.Type[bentoml.Runnable]:
                 load_pretrained_extra_kwargs=load_pretrained_extra_kwargs,
             )
 
-        @bentoml.Runnable.method(batchable=False)
+        @bentoml.legacy.Runnable.method(batchable=False)
         def _replace_scheduler(self, scheduler_txt: str):
             try:
                 scheduler_cls = _str2cls(scheduler_txt)

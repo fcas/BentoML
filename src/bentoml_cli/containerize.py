@@ -10,6 +10,7 @@ import typing as t
 from functools import partial
 
 import click
+import rich
 from click_option_group import optgroup
 
 from bentoml import container
@@ -59,11 +60,11 @@ def compatible_option(*param_decls: str, **attrs: t.Any):
     equivalent: tuple[str, str] = attrs.pop("equivalent", ())
     factory = attrs.pop("factory", click)
 
-    assert (
-        equivalent is not None and len(equivalent) == 2
-    ), "'equivalent' must be a tuple of (new_option, usage)"
+    assert equivalent is not None and len(equivalent) == 2, (
+        "'equivalent' must be a tuple of (new_option, usage)"
+    )
 
-    prepend_msg = "(Equivalent to ``--%s %s``):" % (*equivalent,)
+    prepend_msg = "(Equivalent to ``--%s %s``):" % equivalent
 
     def obsolete_callback(ctx: Context, param: Parameter, value: ClickParamType):
         # NOTE: We want to transform memoized options to tuple[str] | bool | None
@@ -85,6 +86,13 @@ def compatible_option(*param_decls: str, **attrs: t.Any):
         # NOTE: if users are using both old and new options, the new option will take
         # precedence, and the old option will be ignored.
         value = normalize_none_type(value)
+        try:  # click 8.3+
+            from click.core import UNSET
+
+            if default_value is UNSET:
+                default_value = None
+        except ImportError:
+            pass
 
         # if given param.name is not in the memoized options, we need to create them.
         if param.name not in ctx.params[MEMO_KEY]:
@@ -110,8 +118,9 @@ def compatible_option(*param_decls: str, **attrs: t.Any):
                         )
                         new_format = " ".join(
                             map(
-                                lambda s: "--%s %s=%s"
-                                % (equivalent[0], opt.lstrip("--"), s),
+                                lambda s: (
+                                    "--%s %s=%s" % (equivalent[0], opt.lstrip("--"), s)
+                                ),
                                 value,
                             )
                         )
@@ -142,7 +151,7 @@ def compatible_option(*param_decls: str, **attrs: t.Any):
         msg = attrs.pop("help", None)
         assert msg is not None, "'help' is required."
         attrs.setdefault("help", " ".join([prepend_msg, msg, append_msg]))
-        attrs.setdefault("expose_value", True)
+        attrs.setdefault("expose_value", False)
         attrs.setdefault("callback", obsolete_callback)
         return factory.option(*param_decls, **attrs)(f)
 
@@ -151,7 +160,6 @@ def compatible_option(*param_decls: str, **attrs: t.Any):
 
 def compatible_options_group(f: F[t.Any]):
     import click
-    from click_option_group import optgroup
 
     optgroup_option = partial(compatible_option, factory=optgroup)
 
@@ -272,7 +280,6 @@ def compatible_options_group(f: F[t.Any]):
 
 def buildx_options_group(f: F[t.Any]):
     import click
-    from click_option_group import optgroup
 
     optgroup_option = partial(compatible_option, factory=optgroup)
 
@@ -420,6 +427,7 @@ def buildx_options_group(f: F[t.Any]):
     multiple=True,
     callback=opt_callback,
     metavar="ARG=VALUE[,ARG=VALUE]",
+    expose_value=False,
 )
 @click.option(
     "--run-as-root",
@@ -443,7 +451,6 @@ def containerize_command(  # type: ignore
     enable_features: tuple[str] | None,
     run_as_root: bool,
     _memoized: dict[str, t.Any],
-    **kwargs: t.Any,  # pylint: disable=unused-argument
 ) -> None:
     """Containerizes given Bento into an OCI-compliant container, with any given OCI builder.
 
@@ -461,7 +468,7 @@ def containerize_command(  # type: ignore
     ``--image-tag`` flag.
 
     \b
-    You can also prefixing the tag with a hostname for the repository you wish to push to.
+    You can also prefix the tag with a hostname for the repository you wish to push to.
 
     .. code-block:: bash
 
@@ -553,14 +560,10 @@ def containerize_command(  # type: ignore
             elif shutil.which("nerdctl") is not None:
                 container_runtime = "nerdctl"
             else:
-                click.echo(
-                    click.style(
-                        "To load image built with 'buildctl' requires one of "
-                        "docker, podman, nerdctl (None are found in PATH). "
-                        "Make sure they are visible to PATH and try again.",
-                        fg="yellow",
-                    ),
-                    color=True,
+                rich.print(
+                    "[yellow]To load image built with 'buildctl' requires one of "
+                    "docker, podman, nerdctl (None are found in PATH). "
+                    "Make sure they are visible to PATH and try again.[/]",
                 )
                 sys.exit(0)
             if "output" not in _memoized:
@@ -568,32 +571,24 @@ def containerize_command(  # type: ignore
                 type_prefix = "type=oci,name="
                 if container_runtime == "docker":
                     type_prefix = "type=docker,name=docker.io/"
-                click.echo(
-                    click.style(
-                        "Autoconfig is now deprecated and will be removed "
-                        "in the next future release. We recommend setting "
-                        "output to a tarfile should you wish to load the "
-                        "image locally. For example:",
-                        fg="yellow",
-                    ),
-                    color=True,
+                rich.print(
+                    "[yellow]Autoconfig is now deprecated and will be removed "
+                    "in the next future release. We recommend setting "
+                    "output to a tarfile should you wish to load the "
+                    "image locally. For example:[/]",
                 )
-                click.echo(
-                    click.style(
-                        f"    bentoml containerize {bento_tag} --backend buildctl --opt output={type_prefix}{tags[0]},dest={tmp_path}/{tags[0].replace(':', '_')}.tar\n"
-                        f"    {container_runtime} load -i {tmp_path}/{tags[0].replace(':', '_')}.tar",
-                        fg="yellow",
-                    ),
-                    color=True,
+                rich.print(
+                    f"[yellow]    bentoml containerize {bento_tag} --backend buildctl --opt output={type_prefix}{tags[0]},dest={tmp_path}/{tags[0].replace(':', '_')}.tar\n"
+                    f"    {container_runtime} load -i {tmp_path}/{tags[0].replace(':', '_')}.tar[/]",
                 )
                 o = subprocess.check_output([container_runtime, "load"], input=result)
                 if get_debug_mode():
-                    click.echo(o.decode("utf-8").strip())
+                    rich.print(o.decode("utf-8").strip())
                 sys.exit(0)
             return result
 
-        click.echo(
-            f'Successfully built Bento container for "{bento_tag}" with tag(s) "{",".join(tags)}"',
+        rich.print(
+            f'Successfully built Bento container for [green]"{bento_tag}"[/] with tag(s) "{",".join(tags)}"',
         )
         instructions = (
             "To run your newly built Bento container, run:\n"
@@ -606,8 +601,8 @@ def containerize_command(  # type: ignore
         ):
             instructions += (
                 "To serve with gRPC instead, run:\n"
-                + f"    {container_runtime} run --rm -p 3000:3000 -p 3001:3001 {tags[0]} serve-grpc\n"
+                + f"    {container_runtime} run --rm -p 3000:3000 -p 3001:3001 {tags[0]} serve-grpc"
             )
-        click.echo(instructions, nl=False)
-        raise SystemExit(0)
+        rich.print(instructions)
+        sys.exit(0)
     raise SystemExit(1)

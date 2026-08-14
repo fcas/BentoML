@@ -3,9 +3,10 @@ from __future__ import annotations
 import typing as t
 
 from pydantic._internal import _known_annotated_metadata
-from typing_extensions import get_args
-from typing_extensions import get_origin
+from pydantic._internal._typing_extra import is_annotated
 
+from .typing_utils import get_args
+from .typing_utils import get_origin
 from .validators import ContentType
 from .validators import DataframeSchema
 from .validators import DType
@@ -41,25 +42,31 @@ def numpy_prepare_pydantic_annotations(
     if not getattr(source, "__module__", "").startswith("numpy"):
         return None
 
-    origin = get_origin(source) or source
+    origin = get_origin(source)
 
     if origin is not np.ndarray:
         return None
 
     args = get_args(source)
-    dtype = np.dtype(args[1]).name if args else None
+    try:
+        dtype = np.dtype(get_args(args[1])[0]).name if args else None
+    except TypeError:
+        return None
     shape: tuple[int, ...] | None = None
 
-    _, remaining_annotations = _known_annotated_metadata.collect_known_metadata(
-        annotations
-    )
-    for i, annotation in reversed(list(enumerate(remaining_annotations))):
+    _, other_annotations = _known_annotated_metadata.collect_known_metadata(annotations)
+    remaining_annotations = []
+    for annotation in other_annotations:
         if isinstance(annotation, Shape):
             shape = annotation.dimensions
-            del remaining_annotations[i]
         elif isinstance(annotation, DType):
+            if dtype is not None and dtype != annotation.dtype:
+                raise ValueError(
+                    f"Conflicting dtype annotations: {dtype} and {annotation.dtype}"
+                )
             dtype = annotation.dtype
-            del remaining_annotations[i]
+        else:
+            remaining_annotations.append(annotation)
     return source, [TensorSchema("numpy-array", dtype, shape), *remaining_annotations]
 
 
@@ -69,7 +76,7 @@ def torch_prepare_pydantic_annotations(
     if not getattr(source, "__module__", "").startswith("torch"):
         return None
 
-    origin = get_origin(source) or source
+    origin = get_origin(source)
 
     if not issubclass(origin, torch.Tensor):
         return None
@@ -96,7 +103,7 @@ def tf_prepare_pydantic_annotations(
     if not getattr(source, "__module__", "").startswith("tensorflow"):
         return None
 
-    origin = get_origin(source) or source
+    origin = get_origin(source)
     if not issubclass(origin, tf.Tensor):
         return None
 
@@ -122,7 +129,7 @@ def pandas_prepare_pydantic_annotations(
     if not getattr(source, "__module__", "").startswith("pandas"):
         return None
 
-    origin = get_origin(source) or source
+    origin = get_origin(source)
     if not issubclass(origin, pd.DataFrame):
         return None
 
@@ -176,22 +183,58 @@ def pathlib_prepare_pydantic_annotations(
     return source, [FileSchema(content_type=content_type), *remaining_annotations]
 
 
-def add_custom_preparers():
-    try:
-        from pydantic._internal import _std_types_schema
-    except ModuleNotFoundError:
-        return
-    _std_types_schema.PREPARE_METHODS = (
-        # pathlib
-        pathlib_prepare_pydantic_annotations,
-        # inherit from pydantic
-        *_std_types_schema.PREPARE_METHODS,
-        # tensors
-        numpy_prepare_pydantic_annotations,
-        torch_prepare_pydantic_annotations,
-        tf_prepare_pydantic_annotations,
-        # dataframe
-        pandas_prepare_pydantic_annotations,
-        # PIL image
-        pil_prepare_pydantic_annotations,
-    )
+CUSTOM_PREPARE_METHODS = [
+    # path
+    pathlib_prepare_pydantic_annotations,
+    # tensors
+    numpy_prepare_pydantic_annotations,
+    torch_prepare_pydantic_annotations,
+    tf_prepare_pydantic_annotations,
+    # dataframe
+    pandas_prepare_pydantic_annotations,
+    # PIL image
+    pil_prepare_pydantic_annotations,
+]
+
+SUPPORTED_CONTAINER_TYPES = [
+    t.Union,
+    list,
+    t.List,
+    dict,
+    t.Dict,
+    t.AsyncGenerator,
+    t.AsyncIterable,
+    t.AsyncIterator,
+    t.Generator,
+    t.Iterable,
+    t.Iterator,
+]
+
+
+def patch_annotation(
+    annotation: t.Any, model_config: ConfigDict, metadata: t.Iterable[t.Any] = ()
+) -> tuple[t.Any, list[t.Any]]:
+    import typing_extensions as te
+
+    origin, args = te.get_origin(annotation), te.get_args(annotation)
+    if origin in SUPPORTED_CONTAINER_TYPES:
+        patched_args: list[t.Any] = []
+        for arg in args:
+            ann, extras = patch_annotation(arg, model_config)
+            if extras:
+                ann = te.Annotated[(ann, *extras)]
+            patched_args.append(ann)
+        return origin[tuple(patched_args)], list(metadata)
+
+    if is_annotated(annotation):
+        source, *annotations = args
+        metadata = [*annotations, *metadata]
+    else:
+        source = annotation
+        metadata = list(metadata)
+    for method in CUSTOM_PREPARE_METHODS:
+        result = method(source, metadata, model_config)
+        if result is None:
+            continue
+        return result
+    return annotation, list(metadata)

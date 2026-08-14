@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 
 import schema as s
 import yaml
-from deepmerge.merger import Merger
 from simple_di import Provide
 from simple_di import providers
 
@@ -19,10 +18,12 @@ from ...exceptions import BentoMLConfigException
 from ..context import server_context
 from ..context import trace_context
 from ..resource import CpuResource
+from ..utils import deep_merge
 from ..utils import split_with_quotes
-from ..utils import validate_or_create_dir
+from ..utils.filesystem import validate_or_create_dir
 from ..utils.unflatten import unflatten
 from . import expand_env_var
+from . import load_config
 from .helpers import expand_env_var_in_values
 from .helpers import flatten_dict
 from .helpers import get_default_config
@@ -30,24 +31,15 @@ from .helpers import import_configuration_spec
 from .helpers import load_config_file
 
 if TYPE_CHECKING:
-    from fs.base import FS
-
     from .. import external_typing as ext
     from ..bento import BentoStore
+    from ..cloud import BentoCloudClient
+    from ..cloud.client import RestApiClient
     from ..models import ModelStore
     from ..server.metrics.prometheus import PrometheusClient
     from ..utils.analytics import ServeInfo
 
     SerializationStrategy = t.Literal["EXPORT_BENTO", "LOCAL_BENTO", "REMOTE_BENTO"]
-
-config_merger = Merger(
-    # merge dicts
-    type_strategies=[(dict, "merge")],
-    # override all other types
-    fallback_strategies=["override"],
-    # override conflicting types
-    type_conflict_strategies=["override"],
-)
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +65,7 @@ class BentoMLConfiguration:
                 override_defaults = migration(
                     override_config=dict(flatten_dict(override_defaults)),
                 )
-            config_merger.merge(self.config, override_defaults)
+            deep_merge(self.config, override_defaults)
 
         # User override configuration
         if override_config_file is not None:
@@ -86,7 +78,7 @@ class BentoMLConfiguration:
                 override = migration(
                     override_config=dict(flatten_dict(override)),
                 )
-            config_merger.merge(self.config, override)
+            deep_merge(self.config, override)
 
         if override_config_json is not None:
             logger.info(
@@ -97,7 +89,7 @@ class BentoMLConfiguration:
                 override_config_json = migration(
                     override_config=dict(flatten_dict(override_config_json)),
                 )
-            config_merger.merge(self.config, override_config_json)
+            deep_merge(self.config, override_config_json)
 
         if override_config_values is not None:
             logger.info(
@@ -127,7 +119,7 @@ class BentoMLConfiguration:
                 raise BentoMLConfigException(
                     f"Failed to parse config options from the env var:\n{e}.\n*** Note: You can use '\"' to quote the key if it contains special characters. ***"
                 ) from None
-            config_merger.merge(self.config, override)
+            deep_merge(self.config, override)
 
         if finalize_config := getattr(spec_module, "finalize_config", None):
             finalize_config(self.config)
@@ -170,6 +162,16 @@ class _BentoMLContainerClass:
 
     @providers.SingletonFactory
     @staticmethod
+    def result_store_file(bentoml_home: str = Provide[bentoml_home]) -> str:
+        path = os.getenv(
+            "BENTOML_RESULT_STORE", os.path.join(bentoml_home, "task_result.db")
+        )
+        return (
+            os.path.realpath(os.path.expanduser(path)) if path != ":memory:" else path
+        )
+
+    @providers.SingletonFactory
+    @staticmethod
     def tmp_bento_store_dir(bentoml_home: str = Provide[bentoml_home]):
         return os.path.join(bentoml_home, "tmp")
 
@@ -185,15 +187,8 @@ class _BentoMLContainerClass:
 
     @providers.SingletonFactory
     @staticmethod
-    def env_store_dir(bentoml_home: str = Provide[bentoml_home]):
+    def env_store_dir(bentoml_home: str = Provide[bentoml_home]) -> str:
         return os.path.join(bentoml_home, "envs")
-
-    @providers.SingletonFactory
-    @staticmethod
-    def env_store(bentoml_home: str = Provide[bentoml_home]) -> FS:
-        import fs
-
-        return fs.open_fs(os.path.join(bentoml_home, "envs"))
 
     @providers.SingletonFactory
     @staticmethod
@@ -238,20 +233,6 @@ class _BentoMLContainerClass:
         "EXPORT_BENTO"
     )
     worker_index: providers.Static[int] = providers.Static(0)
-
-    @providers.SingletonFactory
-    @staticmethod
-    def yatai_client():
-        from ..cloud.yatai import YataiClient
-
-        return YataiClient()
-
-    @providers.SingletonFactory
-    @staticmethod
-    def bentocloud_client():
-        from ..cloud.bentocloud import BentoCloudClient
-
-        return BentoCloudClient()
 
     @providers.SingletonFactory
     @staticmethod
@@ -316,12 +297,10 @@ class _BentoMLContainerClass:
 
     @providers.SingletonFactory
     @staticmethod
-    def metrics_client(
-        multiproc_dir: str = Provide[prometheus_multiproc_dir],
-    ) -> PrometheusClient:
+    def metrics_client() -> PrometheusClient:
         from ..server.metrics.prometheus import PrometheusClient
 
-        return PrometheusClient(multiproc_dir=multiproc_dir)
+        return PrometheusClient()
 
     tracing = config.tracing
 
@@ -462,19 +441,26 @@ class _BentoMLContainerClass:
         the Prometheus default is returned; otherwise, a set of exponential buckets
         generated based on the configuration is returned.
         """
+        from ..utils.metrics import DEFAULT_BUCKET
         from ..utils.metrics import INF
         from ..utils.metrics import exponential_buckets
 
-        if "buckets" in duration:
-            return tuple(duration["buckets"]) + (INF,)
+        if None not in (
+            duration.get("min"),
+            duration.get("max"),
+            duration.get("factor"),
+        ):
+            return exponential_buckets(
+                duration["min"], duration["factor"], duration["max"]
+            )
+        elif "buckets" in duration:
+            return (
+                (*duration["buckets"], INF) if duration["buckets"] else DEFAULT_BUCKET
+            )
         else:
-            if len(set(duration) - {"min", "max", "factor"}) == 0:
-                return exponential_buckets(
-                    duration["min"], duration["factor"], duration["max"]
-                )
             raise BentoMLConfigException(
-                f"Keys 'min', 'max', and 'factor' are required for 'duration' configuration, '{duration!r}'."
-            ) from None
+                "Either `buckets` or `min`, `max`, and `factor` must be set in `api_server.metrics.duration`"
+            )
 
     @providers.SingletonFactory
     @staticmethod
@@ -492,5 +478,32 @@ class _BentoMLContainerClass:
     def new_index(self) -> bool:
         return "new_index" in self.enabled_features.get()
 
+    @providers.SingletonFactory
+    @staticmethod
+    def cloud_context() -> str | None:
+        return os.getenv("BENTOML_CLOUD_CONTEXT")
+
+    @providers.SingletonFactory
+    @staticmethod
+    def rest_api_client(
+        context: str | None = Provide[cloud_context],
+    ) -> RestApiClient:
+        from ..cloud.config import get_rest_api_client
+
+        return get_rest_api_client(context)
+
+    @providers.SingletonFactory
+    @staticmethod
+    def bentocloud_client(
+        context: str | None = Provide[cloud_context],
+    ) -> BentoCloudClient:
+        from ..cloud import BentoCloudClient
+
+        return BentoCloudClient.for_context(context)
+
+    # Global store of bento arguments
+    bento_arguments = providers.Static[dict[str, t.Any]]({})
+
 
 BentoMLContainer = _BentoMLContainerClass()
+load_config()

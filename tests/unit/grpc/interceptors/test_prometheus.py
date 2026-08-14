@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import shutil
 import sys
 import tempfile
 import typing as t
@@ -10,7 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from bentoml._internal.configuration.containers import BentoMLContainer
-from bentoml._internal.utils import LazyLoader
+from bentoml._internal.utils.lazy_loader import LazyLoader
 from bentoml.grpc.interceptors.prometheus import PrometheusServerInterceptor
 from bentoml.grpc.utils import import_generated_stubs
 from bentoml.grpc.utils import import_grpc
@@ -26,20 +28,29 @@ if TYPE_CHECKING:
     import grpc
     from google.protobuf import wrappers_pb2
 
-    from bentoml import Service
+    from bentoml.legacy import Service
 else:
     wrappers_pb2 = LazyLoader("wrappers_pb2", globals(), "google.protobuf.wrappers_pb2")
     grpc, aio = import_grpc()
 
-prom_dir = tempfile.mkdtemp("prometheus-multiproc")
-BentoMLContainer.prometheus_multiproc_dir.set(prom_dir)
+
 interceptor = PrometheusServerInterceptor()
 
-if "prometheus_client" in sys.modules:
-    mods = [m for m in sys.modules if "prometheus_client" in m]
-    list(map(lambda s: sys.modules.pop(s), mods))
-    if not interceptor._is_setup:
-        interceptor._setup()
+
+@pytest.fixture(scope="module", autouse=True)
+def init_prometheus_dir():
+    prom_dir = tempfile.mkdtemp("prometheus-multiproc")
+    try:
+        os.environ["PROMETHEUS_MULTIPROC_DIR"] = prom_dir
+        if "prometheus_client" in sys.modules:
+            mods = [m for m in sys.modules if "prometheus_client" in m]
+            list(map(lambda s: sys.modules.pop(s), mods))
+            if not interceptor._is_setup:
+                interceptor._setup()
+        yield
+    finally:
+        os.environ.pop("PROMETHEUS_MULTIPROC_DIR")
+        shutil.rmtree(prom_dir, ignore_errors=True)
 
 
 @pytest.mark.asyncio

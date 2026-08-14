@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 import io
 import json
+import logging
 import pickle
 import posixpath
 import typing as t
@@ -19,6 +20,8 @@ from _bentoml_sdk.typing_utils import is_list_type
 from _bentoml_sdk.typing_utils import is_union_type
 from _bentoml_sdk.validators import DataframeSchema
 from _bentoml_sdk.validators import TensorSchema
+from bentoml._internal.utils.uri import is_http_url
+from bentoml._internal.utils.uri import make_safe_connect
 
 if t.TYPE_CHECKING:
     from starlette.requests import Request
@@ -27,6 +30,7 @@ if t.TYPE_CHECKING:
 
 
 T = t.TypeVar("T", bound="IODescriptor")
+logger = logging.getLogger("bentoml.io")
 
 
 @attrs.frozen
@@ -36,6 +40,14 @@ class Payload:
 
     def total_bytes(self) -> int:
         return sum(len(d) for d in self.data)
+
+    def iter_bytes(self) -> t.Iterator[bytes]:
+        for chunk in self.data:
+            yield t.cast(bytes, chunk)
+
+    async def aiter_bytes(self) -> t.AsyncIterator[bytes]:
+        for chunk in self.data:
+            yield t.cast(bytes, chunk)
 
     @property
     def headers(self) -> t.Mapping[str, str]:
@@ -153,6 +165,24 @@ class JSONSerde(GenericSerde, Serde):
             )
         )
 
+    async def parse_request(self, request: Request, cls: type[T]) -> T:
+        import httpx
+
+        from _bentoml_sdk.io_models import IORootModel
+
+        body = await request.body()
+        if issubclass(cls, IORootModel) and cls.multipart_fields:
+            url = body.decode("utf-8", "ignore")
+            if is_http_url(url):
+                async with httpx.AsyncClient() as client:
+                    logger.debug("Request with URL, downloading file from %s", url)
+                    with make_safe_connect():
+                        resp = await client.get(url)
+                    if not resp.is_success:
+                        raise ValueError(f"Failed to download file from {url}")
+                    body = await resp.aread()
+        return self.deserialize_model(Payload((body,), metadata=request.headers), cls)
+
     def deserialize_model(self, payload: Payload, cls: type[T]) -> T:
         return cls.model_validate_json(b"".join(payload.data) or b"{}")
 
@@ -166,15 +196,22 @@ class JSONSerde(GenericSerde, Serde):
 class MultipartSerde(JSONSerde):
     media_type = "multipart/form-data"
 
-    async def ensure_file(self, obj: str | UploadFile) -> UploadFile:
+    @staticmethod
+    async def ensure_file(obj: str | UploadFile) -> UploadFile:
         import httpx
 
         if isinstance(obj, UploadFile):
             return obj
+
+        url = obj.strip("\"'")
+
         async with httpx.AsyncClient() as client:
-            resp = await client.get(obj)
+            with make_safe_connect():
+                resp = await client.get(url)
+            if not resp.is_success:
+                raise ValueError(f"Failed to download file from {url}")
             body = io.BytesIO(await resp.aread())
-            parsed = urlparse(obj)
+            parsed = urlparse(url)
             return UploadFile(
                 body,
                 size=len(body.getvalue()),
@@ -197,7 +234,9 @@ class MultipartSerde(JSONSerde):
                 elif len(value) >= 1:
                     data[k] = value[0]
             else:
-                assert isinstance(v := form[k], str)
+                v = form[k]
+                if isinstance(v, UploadFile):
+                    v = await v.read()
                 try:
                     data[k] = json.loads(v)
                 except json.JSONDecodeError:

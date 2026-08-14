@@ -4,25 +4,28 @@ import contextlib
 import importlib
 import logging
 import os
+import shutil
 import sys
+import tempfile
 import types
 import typing as t
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-import fs
-import fs.mirror
 from simple_di import Provide
 from simple_di import inject
 
+from ...exceptions import BentoMLException
 from ...exceptions import InvalidArgument
 from ..configuration.containers import BentoMLContainer
-from ..utils import bentoml_cattr
+from ..utils.cattr import bentoml_cattr
 from .base import OCIBuilder
 from .generate import generate_containerfile
 
 if TYPE_CHECKING:
     from ..bento import Bento
     from ..bento import BentoStore
+    from ..bento.build_config import BentoEnvSchema
     from ..tag import Tag
     from .base import Arguments
 
@@ -111,6 +114,19 @@ def enable_buildkit(
         raise ValueError("Either backend or builder must be provided.")
 
 
+def split_envs_by_stage(
+    envs: t.Sequence[BentoEnvSchema],
+) -> tuple[list[BentoEnvSchema], list[BentoEnvSchema]]:
+    runtime_envs: list[BentoEnvSchema] = []
+    build_envs: list[BentoEnvSchema] = []
+    for env in envs:
+        if env.stage == "build":
+            build_envs.append(env)
+        else:
+            runtime_envs.append(env)
+    return runtime_envs, build_envs
+
+
 # XXX: Sync with BentoML extra dependencies found in pyproject.toml
 FEATURES = frozenset(
     {
@@ -142,68 +158,96 @@ def construct_containerfile(
     features: t.Sequence[str] | None = None,
     add_header: bool = False,
 ) -> t.Generator[tuple[str, str], None, None]:
+    from _bentoml_sdk.models import BentoModel
+    from _bentoml_sdk.models import HuggingFaceModel
+
+    from ..bento.bento import BaseBentoInfo
     from ..bento.bento import BentoInfo
+    from ..bento.bento import BentoInfoV2
     from ..bento.build_config import DockerOptions
-    from ..models import ModelStore
-    from ..models import copy_model
 
     dockerfile_path = "env/docker/Dockerfile"
     instruction: list[str] = []
 
-    with fs.open_fs("temp://") as temp_fs:
-        tempdir = temp_fs.getsyspath("/")
+    with tempfile.TemporaryDirectory() as tempdir:
         with open(bento.path_of("bento.yaml"), "rb") as bento_yaml:
-            options = BentoInfo.from_yaml_file(bento_yaml)
+            options = BaseBentoInfo.from_yaml_file(bento_yaml)
         # tmpdir is our new build context.
-        fs.mirror.mirror(bento._fs, temp_fs, copy_if_newer=True)
+        shutil.copytree(bento.path, tempdir, dirs_exist_ok=True)
 
         # copy models from model store
-        model_store = BentoMLContainer.model_store.get()
-        bento_model_store = ModelStore(temp_fs.makedir("models", recreate=True))
+        bento_model_dir = Path(tempdir, "models")
+        hf_model_dir = Path(tempdir, "hf-models")
+        for model_dir in (bento_model_dir, hf_model_dir):
+            model_dir.mkdir(parents=True, exist_ok=True)
         for model in options.all_models:
-            copy_model(
-                model.tag,
-                src_model_store=model_store,
-                target_model_store=bento_model_store,
-            )
+            if model.registry == "huggingface":
+                model_ref = HuggingFaceModel.from_info(model)
+                model_ref.resolve(hf_model_dir)
+            else:
+                model_ref = BentoModel.from_info(model)
+                model_ref.resolve(bento_model_dir)
 
         # NOTE: dockerfile_template is already included in the
         # Dockerfile inside bento, and it is not relevant to
         # construct_containerfile. Hence it is safe to set it to None here.
         # See https://github.com/bentoml/BentoML/issues/3399.
-        docker_attrs = bentoml_cattr.unstructure(options.docker)
-        if (
-            "dockerfile_template" in docker_attrs
-            and docker_attrs["dockerfile_template"] is not None
-        ):
-            # NOTE: if users specify a dockerfile_template, we will
-            # save it to /env/docker/Dockerfile.template. This is necessary
-            # for the reconstruction of the Dockerfile.
-            docker_attrs["dockerfile_template"] = "env/docker/Dockerfile.template"
+        if isinstance(options, BentoInfo):
+            docker_attrs = bentoml_cattr.unstructure(options.docker)
+            if (
+                "dockerfile_template" in docker_attrs
+                and docker_attrs["dockerfile_template"] is not None
+            ):
+                # NOTE: if users specify a dockerfile_template, we will
+                # save it to /env/docker/Dockerfile.template. This is necessary
+                # for the reconstruction of the Dockerfile.
+                docker_attrs["dockerfile_template"] = "env/docker/Dockerfile.template"
 
-        dockerfile = generate_containerfile(
-            docker=DockerOptions(**docker_attrs),
-            build_ctx=tempdir,
-            conda=options.conda,
-            bento_fs=temp_fs,
-            enable_buildkit=enable_buildkit,
-            add_header=add_header,
-        )
-        instruction.append(dockerfile)
-        if features is not None:
-            diff = set(features).difference(FEATURES)
-            if len(diff) > 0:
-                raise InvalidArgument(
-                    f"Available features are: {FEATURES}. Invalid fields from provided: {diff}"
+            dockerfile = generate_containerfile(
+                docker=DockerOptions(**docker_attrs),
+                build_ctx=tempdir,
+                conda=options.conda,
+                bento_fs=Path(tempdir),
+                enable_buildkit=enable_buildkit,
+                add_header=add_header,
+            )
+            instruction.append(dockerfile)
+            if features is not None:
+                diff = set(features).difference(FEATURES)
+                if len(diff) > 0:
+                    raise InvalidArgument(
+                        f"Available features are: {FEATURES}. Invalid fields from provided: {diff}"
+                    )
+                PIP_CACHE_MOUNT = (
+                    "--mount=type=cache,target=/root/.cache/pip "
+                    if enable_buildkit
+                    else ""
                 )
-            PIP_CACHE_MOUNT = (
-                "--mount=type=cache,target=/root/.cache/pip " if enable_buildkit else ""
+                instruction.append(
+                    "RUN %spip install bentoml[%s]"
+                    % (PIP_CACHE_MOUNT, ",".join(features))
+                )
+        else:
+            from _bentoml_impl.docker import generate_dockerfile
+
+            assert isinstance(options, BentoInfoV2)
+            runtime_envs, build_env = split_envs_by_stage(options.envs)
+            if build_env and not enable_buildkit:
+                raise BentoMLException(
+                    "stage='build' environment variables require BuildKit. "
+                    "Enable BuildKit for your backend (e.g. set DOCKER_BUILDKIT=1)."
+                )
+            dockerfile = generate_dockerfile(
+                options.image,
+                Path(tempdir),
+                enable_buildkit=enable_buildkit,
+                add_header=add_header,
+                envs=runtime_envs,
+                secret_envs=build_env,
             )
-            instruction.append(
-                "RUN %spip install bentoml[%s]" % (PIP_CACHE_MOUNT, ",".join(features))
-            )
-        temp_fs.writetext(dockerfile_path, "\n".join(instruction))
-        yield tempdir, temp_fs.getsyspath(dockerfile_path)
+            instruction.append(dockerfile)
+        Path(tempdir, dockerfile_path).write_text("\n".join(instruction))
+        yield tempdir, os.path.join(tempdir, dockerfile_path)
 
 
 @inject
@@ -219,14 +263,45 @@ def build(
     bento = _bento_store.get(bento_tag)
 
     builder = get_backend(backend)
+    buildkit_enabled = enable_buildkit(builder=builder)
+    _, build_stage_envs = split_envs_by_stage(bento.info.envs)
+    secret_specs: list[str] = []
+    if build_stage_envs:
+        if not buildkit_enabled:
+            raise BentoMLException(
+                "stage='build' environment variables require BuildKit. "
+                "Enable BuildKit for your backend (e.g. set DOCKER_BUILDKIT=1)."
+            )
+        for env in build_stage_envs:
+            secret_value = os.getenv(env.name, env.value)
+            if secret_value is None:
+                raise BentoMLException(
+                    f"Environment variable '{env.name}' (stage='build') is required during image build."
+                )
+            secret_file = tempfile.NamedTemporaryFile("w", delete=False)
+            secret_file.write(secret_value)
+            secret_file.flush()
+            secret_file.close()
+            clean_context.callback(lambda path=secret_file.name: os.remove(path))
+            secret_specs.append(f"id={env.name},src={secret_file.name}")
+
     context_path, dockerfile = clean_context.enter_context(
         construct_containerfile(
             bento,
             features=features,
-            enable_buildkit=enable_buildkit(builder=builder),
+            enable_buildkit=buildkit_enabled,
         )
     )
     try:
+        if secret_specs:
+            existing_secret = kwargs.get("secret")
+            if existing_secret is None:
+                merged_secret: tuple[str, ...] = tuple(secret_specs)
+            elif isinstance(existing_secret, (tuple, list)):
+                merged_secret = (*existing_secret, *secret_specs)
+            else:
+                merged_secret = (existing_secret, *secret_specs)
+            kwargs["secret"] = merged_secret
         kwargs.update({"file": dockerfile, "context_path": context_path})
         return builder.build(**kwargs)
     except Exception as e:  # pylint: disable=broad-except
@@ -364,4 +439,5 @@ __all__ = [
     "register_backend",
     "get_backend",
     "REGISTERED_BACKENDS",
+    "split_envs_by_stage",
 ]

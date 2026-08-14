@@ -2,17 +2,18 @@
 from __future__ import annotations
 
 import os
+import posixpath
 from datetime import datetime
 from datetime import timezone
 from sys import version_info
 from typing import TYPE_CHECKING
 
-import fs
 import pytest
 
 from bentoml import Tag
 from bentoml import bentos
 from bentoml._internal.bento import Bento
+from bentoml._internal.bento.bento import BaseBentoInfo
 from bentoml._internal.bento.bento import BentoApiInfo
 from bentoml._internal.bento.bento import BentoInfo
 from bentoml._internal.bento.bento import BentoModelInfo
@@ -93,6 +94,12 @@ models:
   module: model_b_module
   creation_time: '{model_creation_time}'
   alias: model_b_alias
+entry_service: ''
+services: []
+envs: []
+schema: {{}}
+args: {{}}
+spec: 1
 runners:
 - name: runner_a
   runnable_type: test_runnable_a
@@ -101,10 +108,6 @@ runners:
   - runner_a_model
   resource_config:
     cpu: 2
-entry_service: ''
-services: []
-envs: []
-schema: {{}}
 apis:
 - name: predict
   input_type: NumpyNdarray
@@ -130,6 +133,7 @@ python:
   extra_index_url: null
   pip_args: null
   wheels: null
+  is_src_layout: false
 conda:
   environment_yml: null
   channels: null
@@ -146,14 +150,14 @@ conda:
         )
 
     with open(bento_yaml_b_filename, encoding="utf-8") as bento_yaml_b:
-        bentoinfo_b_from_yaml = BentoInfo.from_yaml_file(bento_yaml_b)
+        bentoinfo_b_from_yaml = BaseBentoInfo.from_yaml_file(bento_yaml_b)
 
         assert bentoinfo_b_from_yaml == bentoinfo_b
 
 
 def build_test_bento() -> Bento:
     bento_cfg = BentoBuildConfig(
-        "simplebento.py:svc",
+        "simplebento.py:SimpleBento",
         include=["*.py", "config.json", "somefile", "*dir*", ".bentoignore"],
         exclude=["*.storage", "/somefile", "/subdir2"],
         conda={
@@ -173,24 +177,15 @@ def build_test_bento() -> Bento:
     return Bento.create(bento_cfg, version="1.0", build_ctx="./simplebento")
 
 
-def fs_identical(fs1: fs.base.FS, fs2: fs.base.FS):
-    for path in fs1.walk.dirs():
-        assert fs2.isdir(path)
-
-    for path in fs1.walk.files():
-        assert fs2.isfile(path)
-        assert fs1.readbytes(path) == fs2.readbytes(path)
-
-
 @pytest.mark.usefixtures("change_test_dir")
-def test_bento_export(tmpdir: "Path", model_store: "ModelStore"):
+def test_bento_export(tmp_path: "Path", model_store: "ModelStore"):
     working_dir = os.getcwd()
 
     testbento = build_test_bento()
     # Bento build will change working dir to the build_context, this will reset it
     os.chdir(working_dir)
 
-    cfg = BentoBuildConfig("bentoa.py:svc")
+    cfg = BentoBuildConfig("bentoa.py:BentoA")
     bentoa = Bento.create(cfg, build_ctx="./bentoa")
     # Bento build will change working dir to the build_context, this will reset it
     os.chdir(working_dir)
@@ -199,13 +194,13 @@ def test_bento_export(tmpdir: "Path", model_store: "ModelStore"):
     # Bento build will change working dir to the build_context, this will reset it
     os.chdir(working_dir)
 
-    cfg = BentoBuildConfig("bentob.py:svc")
+    cfg = BentoBuildConfig("bentob.py:BentoB")
     bentob = Bento.create(cfg, build_ctx="./bentob")
 
     bento = testbento
-    path = os.path.join(tmpdir, "testbento")
+    path = posixpath.join(tmp_path, "testbento")
     export_path = bento.export(path)
-    assert export_path == path + ".bento"
+    assert export_path == path.replace(os.sep, "/") + ".bento"
     assert os.path.isfile(export_path)
     imported_bento = Bento.import_from(export_path)
     assert imported_bento.tag == bento.tag
@@ -213,9 +208,9 @@ def test_bento_export(tmpdir: "Path", model_store: "ModelStore"):
     del imported_bento
 
     bento = bentoa
-    path = os.path.join(tmpdir, "bentoa")
+    path = posixpath.join(tmp_path, "bentoa")
     export_path = bento.export(path)
-    assert export_path == path + ".bento"
+    assert export_path == path.replace(os.sep, "/") + ".bento"
     assert os.path.isfile(export_path)
     imported_bento = Bento.import_from(export_path)
     assert imported_bento.tag == bento.tag
@@ -223,9 +218,9 @@ def test_bento_export(tmpdir: "Path", model_store: "ModelStore"):
     del imported_bento
 
     bento = bentoa1
-    path = os.path.join(tmpdir, "bentoa1")
+    path = posixpath.join(tmp_path, "bentoa1")
     export_path = bento.export(path)
-    assert export_path == path + ".bento"
+    assert export_path == path.replace(os.sep, "/") + ".bento"
     assert os.path.isfile(export_path)
     imported_bento = Bento.import_from(export_path)
     assert imported_bento.tag == bento.tag
@@ -233,9 +228,9 @@ def test_bento_export(tmpdir: "Path", model_store: "ModelStore"):
     del imported_bento
 
     bento = bentob
-    path = os.path.join(tmpdir, "bentob")
+    path = posixpath.join(tmp_path, "bentob")
     export_path = bento.export(path)
-    assert export_path == path + ".bento"
+    assert export_path == path.replace(os.sep, "/") + ".bento"
     assert os.path.isfile(export_path)
     imported_bento = Bento.import_from(export_path)
     assert imported_bento.tag == bento.tag
@@ -243,49 +238,48 @@ def test_bento_export(tmpdir: "Path", model_store: "ModelStore"):
     del imported_bento
 
     bento = testbento
-    path = os.path.join(tmpdir, "testbento.bento")
+    path = posixpath.join(tmp_path, "testbento.bento")
     export_path = bento.export(path)
-    assert export_path == path
+    assert export_path == path.replace(os.sep, "/")
     assert os.path.isfile(export_path)
     imported_bento = Bento.import_from(path)
     assert imported_bento.tag == bento.tag
     assert imported_bento.info == bento.info
     del imported_bento
 
-    path = os.path.join(tmpdir, "testbento-parent")
+    path = posixpath.join(tmp_path, "testbento-parent")
     os.mkdir(path)
     export_path = bento.export(path)
-    assert export_path == os.path.join(path, bento._export_name + ".bento")
+    assert export_path == posixpath.join(path, bento._export_name + ".bento").replace(
+        os.sep, "/"
+    )
     assert os.path.isfile(export_path)
     imported_bento = Bento.import_from(export_path)
     assert imported_bento.tag == bento.tag
     assert imported_bento.info == bento.info
     del imported_bento
 
-    path = os.path.join(tmpdir, "testbento-parent-2/")
-    with pytest.raises(ValueError):
+    path = posixpath.join(tmp_path, "testbento-parent-2/")
+    with pytest.raises(FileNotFoundError):
         export_path = bento.export(path)
 
-    path = os.path.join(tmpdir, "bento-dir")
+    path = posixpath.join(tmp_path, "bento-dir")
     os.mkdir(path)
     export_path = bento.export(path)
-    assert export_path == os.path.join(path, bento._export_name + ".bento")
+    assert export_path == posixpath.join(path, bento._export_name + ".bento").replace(
+        os.sep, "/"
+    )
     assert os.path.isfile(export_path)
     imported_bento = Bento.import_from(export_path)
     assert imported_bento.tag == bento.tag
     assert imported_bento.info == bento.info
     del imported_bento
 
-    path = "temp://pytest-some-temp"
+    path = "file://" + posixpath.join(tmp_path, "testbento-by-url")
     export_path = bento.export(path)
-    assert export_path.endswith(
-        os.path.join("pytest-some-temp", bento._export_name + ".bento")
+    assert export_path == posixpath.join(tmp_path, "testbento-by-url.bento").replace(
+        os.sep, "/"
     )
-    # because this is a tempdir, it's cleaned up immediately after creation...
-
-    path = "osfs://" + fs.path.join(str(tmpdir), "testbento-by-url")
-    export_path = bento.export(path)
-    assert export_path == os.path.join(tmpdir, "testbento-by-url.bento")
     assert os.path.isfile(export_path)
     imported_bento = Bento.import_from(export_path)
     assert imported_bento.tag == bento.tag
@@ -296,30 +290,32 @@ def test_bento_export(tmpdir: "Path", model_store: "ModelStore"):
     assert imported_bento.info == bento.info
     del imported_bento
 
-    path = "osfs://" + fs.path.join(str(tmpdir), "testbento-by-url")
+    path = "file://" + posixpath.join(tmp_path, "testbento-by-url")
     with pytest.raises(ValueError):
         bento.export(path, subpath="/badsubpath")
 
-    path = "zip://" + fs.path.join(str(tmpdir), "testbento.zip")
+    path = "zip://" + posixpath.join(tmp_path, "testbento.zip")
     export_path = bento.export(path)
-    assert export_path == path
+    assert export_path == path[6:].replace(os.sep, "/")
     imported_bento = Bento.import_from(export_path)
     assert imported_bento.tag == bento.tag
     assert imported_bento.info == bento.info
     del imported_bento
 
-    path = os.path.join(tmpdir, "testbento-gz")
+    path = posixpath.join(tmp_path, "testbento-gz")
     os.mkdir(path)
     export_path = bento.export(path, output_format="gz")
-    assert export_path == os.path.join(path, bento._export_name + ".gz")
+    assert export_path == posixpath.join(path, bento._export_name + ".gz").replace(
+        os.sep, "/"
+    )
     assert os.path.isfile(export_path)
     imported_bento = Bento.import_from(export_path)
     assert imported_bento.tag == bento.tag
     assert imported_bento.info == bento.info
     del imported_bento
 
-    path = os.path.join(tmpdir, "testbento-gz-1/")
-    with pytest.raises(ValueError):
+    path = posixpath.join(tmp_path, "testbento-gz-1/")
+    with pytest.raises(FileNotFoundError):
         bento.export(path, output_format="gz")
 
 
@@ -351,17 +347,31 @@ def test_bento(model_store: ModelStore):
     assert start <= bento.creation_time <= end
     # validate should fail
 
-    with bento._fs as bento_fs:  # type: ignore
-        assert set(bento_fs.listdir("/")) == {
-            "bento.yaml",
-            "apis",
-            "README.md",
-            "src",
-            "env",
-        }
-        assert set(bento_fs.listdir("src")) == {
-            "simplebento.py",
-            "subdir",
-            ".bentoignore",
-        }
-        assert set(bento_fs.listdir("src/subdir")) == {"somefile"}
+    def list_bento(path: str) -> set[str]:
+        return set(os.listdir(bento.path_of(path)))
+
+    assert list_bento("/") == {
+        "bento.yaml",
+        "apis",
+        "README.md",
+        "src",
+        "env",
+    }
+    assert list_bento("src") == {
+        "simplebento.py",
+        "subdir",
+        "bentofile.yaml",
+        ".bentoignore",
+    }
+    assert list_bento("src/subdir") == {"somefile"}
+
+
+@pytest.mark.usefixtures("change_test_dir")
+def test_build_bento_with_args():
+    from bentoml._internal.configuration.containers import BentoMLContainer
+
+    bento = bentos.build_bentofile(
+        build_ctx="./bento_with_args", args={"label": "awesome"}
+    )
+    BentoMLContainer.bento_arguments.reset()
+    assert bento.info.args == {"label": "awesome"}

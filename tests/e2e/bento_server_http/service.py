@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+import prometheus_client
 import pydantic
 from fastapi import FastAPI
 from PIL.Image import Image as PILImage
@@ -40,26 +41,25 @@ py_model = (
 )
 
 
-class StreamRunnable(bentoml.Runnable):
+class StreamRunnable(bentoml.legacy.Runnable):
     SUPPORTED_RESOURCES = ("cpu",)
     SUPPORTS_CPU_MULTI_THREADING = True
 
-    @bentoml.Runnable.method()
+    @bentoml.legacy.Runnable.method()
     async def count_text_stream(self, input_text: str) -> t.AsyncGenerator[str, None]:
         for i in range(10):
             await asyncio.sleep(0.1)
             yield f"{input_text} {i}"
 
 
-stream_runner = bentoml.Runner(StreamRunnable)
+stream_runner = bentoml.legacy.Runner(StreamRunnable)
 
-svc = bentoml.Service(
+svc = bentoml.legacy.Service(
     name="general_http_service.case-1.e2e", runners=[py_model, stream_runner]
 )
-TEST_DIR = os.getenv("BENTOML_TEST_DATA")
 
 
-metric_test = bentoml.metrics.Counter(
+metric_test = prometheus_client.Counter(
     name="test_metrics", documentation="Counter test metric"
 )
 
@@ -78,9 +78,12 @@ async def echo_delay(data: dict[str, t.Any]) -> JSONSerializable:
 
 @svc.api(input=bentoml.io.Text(), output=bentoml.io.Text())
 def ensure_metrics_are_registered(data: str) -> str:  # pylint: disable=unused-argument
+    from prometheus_client import generate_latest
+    from prometheus_client.parser import text_string_to_metric_families
+
     counters = [
         m.name
-        for m in bentoml.metrics.text_string_to_metric_families()
+        for m in text_string_to_metric_families(generate_latest().decode())
         if m.type == "counter"
     ]
     assert "test_metrics" in counters
@@ -265,9 +268,10 @@ def get_uid():
 
 @svc.on_deployment
 def on_deployment():
-    if not TEST_DIR or not os.path.exists(TEST_DIR):
+    test_dir = os.getenv("BENTOML_TEST_DATA")
+    if not test_dir or not os.path.exists(test_dir):
         return
-    deployment_file = os.path.join(TEST_DIR, f"deployment-{get_uid()}.txt")
+    deployment_file = os.path.join(test_dir, f"deployment-{get_uid()}.txt")
     with open(deployment_file, "w"):
         pass
 
@@ -275,9 +279,10 @@ def on_deployment():
 @svc.on_startup
 def on_startup(ctx: bentoml.Context):
     ctx.state["data"] = "hello"
-    if not TEST_DIR or not os.path.exists(TEST_DIR):
+    test_dir = os.getenv("BENTOML_TEST_DATA")
+    if not test_dir or not os.path.exists(test_dir):
         return
-    text_file = os.path.join(TEST_DIR, f"data-{get_uid()}.txt")
+    text_file = os.path.join(test_dir, f"data-{get_uid()}.txt")
     with open(text_file, "w"):
         pass
     ctx.state["text_file"] = text_file

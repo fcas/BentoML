@@ -1,10 +1,21 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import typing as t
 
 import click
+
+from .patch import patch_safetensor
+
+logger = logging.getLogger("bentoml.worker.service")
+
+
+def get_model_preheat():
+    """Get the model preheat flag from the environment variable BENTOML_MODEL_PREHEAT."""
+    env_var = os.getenv("BENTOML_MODEL_PREHEAT", "0")
+    return env_var not in ("0", "false", "False", "")
 
 
 @click.command()
@@ -24,11 +35,6 @@ import click
 )
 @click.option(
     "--backlog", type=click.INT, default=2048, help="Backlog size for the socket"
-)
-@click.option(
-    "--prometheus-dir",
-    type=click.Path(exists=True),
-    help="Required by prometheus to pass the metrics in multi-process mode",
 )
 @click.option(
     "--worker-env", type=click.STRING, default=None, help="Environment variables"
@@ -107,6 +113,13 @@ import click
     type=click.INT,
     help="Specify the timeout for API server",
 )
+@click.option(
+    "--model-preheat",
+    is_flag=True,
+    default=lambda: get_model_preheat(),
+    help="Preheat model loading in parallel using multiple processes. Can be set via the environment variable BENTOML_MODEL_PREHEAT.",
+)
+@click.option("--args", type=click.STRING, help="Bento arguments dict for the service")
 def main(
     bento_identifier: str,
     service_name: str,
@@ -115,7 +128,6 @@ def main(
     backlog: int,
     worker_env: str | None,
     worker_id: int | None,
-    prometheus_dir: str | None,
     ssl_certfile: str | None,
     ssl_keyfile: str | None,
     ssl_keyfile_password: str | None,
@@ -127,6 +139,8 @@ def main(
     timeout_graceful_shutdown: int | None,
     development_mode: bool,
     timeout: int,
+    model_preheat: bool,
+    args: str | None,
 ):
     """
     Start a HTTP server worker for given service.
@@ -148,37 +162,49 @@ def main(
                 )
             os.environ.update(env_list[worker_key])
 
-    from _bentoml_impl.loader import import_service
+    from _bentoml_impl.loader import load
     from bentoml._internal.container import BentoMLContainer
     from bentoml._internal.context import server_context
     from bentoml._internal.log import configure_server_logging
+    from bentoml._internal.utils.args import set_arguments
+    from bentoml._internal.utils.uri import join_paths
 
+    if args:
+        set_arguments(json.loads(args))
+
+    configure_server_logging()
     if runner_map:
         BentoMLContainer.remote_runner_mapping.set(
             t.cast(t.Dict[str, str], json.loads(runner_map))
         )
 
-    service = import_service(bento_identifier)
+    if worker_id is not None:
+        server_context.worker_index = worker_id
+    if model_preheat:
+        patch_safetensor()
+    # standalone_build=True means to not restore cwd and model store
+    service = load(bento_identifier, standalone_load=True)
 
     if service_name and service_name != service.name:
-        service = service.find_dependent(service_name)
+        service = service.find_dependent_by_name(service_name)
         server_context.service_type = "service"
     else:
         server_context.service_type = "entry_service"
 
-    if worker_id is not None:
-        server_context.worker_index = worker_id
-
-    configure_server_logging()
     BentoMLContainer.development_mode.set(development_mode)
 
-    if prometheus_dir is not None:
-        BentoMLContainer.prometheus_multiproc_dir.set(prometheus_dir)
     server_context.service_name = service.name
+    server_context.service_routes = [
+        join_paths(service.path_prefix, api.route) for api in service.apis.values()
+    ]
+    if service.bento is None:
+        server_context.bento_name = service.name
+        server_context.bento_version = "not available"
+    else:
+        server_context.bento_name = service.bento.tag.name
+        server_context.bento_version = service.bento.tag.version or "not available"
 
-    asgi_app = service.to_asgi(
-        is_main=server_context.service_type == "entry_service", init=False
-    )
+    asgi_app = service.to_asgi(is_main=server_context.service_type == "entry_service")
 
     uvicorn_extra_options: dict[str, t.Any] = {}
     if ssl_version is not None:

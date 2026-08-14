@@ -143,7 +143,7 @@ def _series_openapi_schema(
 
 class SerializationFormat(Enum):
     JSON = "application/json"
-    PARQUET = "application/octet-stream"
+    PARQUET = "application/vnd.apache.parquet"
     CSV = "text/csv"
 
     def __init__(self, mime_type: str):
@@ -169,7 +169,8 @@ def _infer_serialization_format_from_request(
 
     if content_type == "application/json":
         return SerializationFormat.JSON
-    elif content_type == "application/octet-stream":
+    # We accept octet-stream as Parquet to avoid breaking legacy code.
+    elif content_type in ("application/vnd.apache.parquet", "application/octet-stream"):
         return SerializationFormat.PARQUET
     elif content_type == "text/csv":
         return SerializationFormat.CSV
@@ -224,7 +225,7 @@ class PandasDataFrame(
 
        runner = bentoml.sklearn.get("sklearn_model_clf").to_runner()
 
-       svc = bentoml.Service("iris-classifier", runners=[runner])
+       svc = bentoml.legacy.Service("iris-classifier", runners=[runner])
 
        @svc.api(input=input_spec, output=PandasDataFrame())
        def predict(input_arr):
@@ -309,7 +310,7 @@ class PandasDataFrame(
                         It is also the serialization format used for the response. Possible values are:
 
                         - :obj:`json` - JSON text format (inferred from content-type ``"application/json"``)
-                        - :obj:`parquet` - Parquet binary format (inferred from content-type ``"application/octet-stream"``)
+                        - :obj:`parquet` - Parquet binary format (inferred from content-type ``"application/vnd.apache.parquet"``)
                         - :obj:`csv` - CSV text format (inferred from content-type ``"text/csv"``)
 
     Returns:
@@ -369,7 +370,7 @@ class PandasDataFrame(
                             It is also the serialization format used for the response. Possible values are:
 
                             - :obj:`json` - JSON text format (inferred from content-type ``"application/json"``)
-                            - :obj:`parquet` - Parquet binary format (inferred from content-type ``"application/octet-stream"``)
+                            - :obj:`parquet` - Parquet binary format (inferred from content-type ``"application/vnd.apache.parquet"``)
                             - :obj:`csv` - CSV text format (inferred from content-type ``"text/csv"``)
 
         Returns:
@@ -669,7 +670,7 @@ class PandasDataFrame(
                 # large tabular data
                 if len(content.ListFields()) != 1:
                     raise BadInput(
-                        f"Array contents can only be one of given values key. Use one of '{list(map(lambda f: f[0].name,content.ListFields()))}' instead."
+                        f"Array contents can only be one of given values key. Use one of '{list(map(lambda f: f[0].name, content.ListFields()))}' instead."
                     ) from None
                 return {str(i): c for i, c in enumerate(content.ListFields()[0][1])}
 
@@ -799,7 +800,7 @@ class PandasSeries(
 
         runner = bentoml.sklearn.get("sklearn_model_clf").to_runner()
 
-        svc = bentoml.Service("iris-classifier", runners=[runner])
+        svc = bentoml.legacy.Service("iris-classifier", runners=[runner])
 
         @svc.api(input=PandasSeries(), output=PandasSeries())
         def predict(input_arr):

@@ -1,22 +1,26 @@
 from __future__ import annotations
 
-import json
-import typing as t
+import logging
+import sys
+import time
+import urllib.parse
+import webbrowser
 
 import click
-import click_option_group as cog
+import httpx
+import rich
 
 from bentoml._internal.cloud.client import RestApiClient
+from bentoml._internal.cloud.config import DEFAULT_ENDPOINT
 from bentoml._internal.cloud.config import CloudClientConfig
 from bentoml._internal.cloud.config import CloudClientContext
-from bentoml._internal.cloud.config import add_context
-from bentoml._internal.cloud.config import default_context_name
-from bentoml._internal.utils import bentoml_cattr
+from bentoml._internal.configuration.containers import BentoMLContainer
+from bentoml._internal.utils.cattr import bentoml_cattr
 from bentoml.exceptions import CLIException
+from bentoml.exceptions import CloudRESTApiClientError
 from bentoml_cli.utils import BentoMLCommandGroup
 
-if t.TYPE_CHECKING:
-    from .utils import SharedOptions
+logger = logging.getLogger("bentoml.cli")
 
 
 @click.group(name="cloud", cls=BentoMLCommandGroup)
@@ -25,56 +29,131 @@ def cloud_command():
 
 
 @cloud_command.command()
-@cog.optgroup.group(
-    "Login", help="Required login options", cls=cog.RequiredAllOptionGroup
-)
-@cog.optgroup.option(
+@click.option(
     "--endpoint",
     type=click.STRING,
-    help="BentoCloud or Yatai endpoint, i.e: https://cloud.bentoml.com",
+    help="BentoCloud endpoint",
+    default=DEFAULT_ENDPOINT,
+    envvar="BENTO_CLOUD_API_ENDPOINT",
+    show_default=True,
+    show_envvar=True,
+    required=False,
 )
-@cog.optgroup.option(
+@click.option(
     "--api-token",
     type=click.STRING,
-    help="BentoCloud or Yatai user API token",
+    help="BentoCloud user API token",
+    envvar="BENTO_CLOUD_API_KEY",
+    show_envvar=True,
+    required=False,
 )
-@click.pass_obj
-def login(shared_options: SharedOptions, endpoint: str, api_token: str) -> None:  # type: ignore (not accessed)
-    """Login to BentoCloud or Yatai server."""
-    cloud_rest_client = RestApiClient(endpoint, api_token)
-    user = cloud_rest_client.v1.get_current_user()
+def login(endpoint: str, api_token: str) -> None:  # type: ignore (not accessed)
+    """Login to BentoCloud."""
+    from rich.prompt import Confirm
+    from rich.prompt import Prompt
+    from rich_toolkit.menu import Menu
 
-    if user is None:
-        raise CLIException("current user is not found")
+    if not api_token:
+        choice = Menu(
+            label="How would you like to authenticate BentoML CLI?",
+            options=[
+                {
+                    "name": "Create a new API token with a web browser",
+                    "value": "create",
+                },
+                {"name": "Paste an existing API token", "value": "paste"},
+            ],
+        ).ask()
 
-    org = cloud_rest_client.v1.get_current_organization()
+        if choice == "create":
+            endpoint = endpoint.rstrip("/")
+            code_url = f"{endpoint}/api/v1/auth/code"
+            token_url = f"{endpoint}/api/v1/auth/token"
+            try:
+                code = httpx.get(code_url).json()["code"]
+            except httpx.HTTPError as e:
+                rich.print(
+                    f":police_car_light: Error fetching auth code: {e}", file=sys.stderr
+                )
+                raise SystemExit(1)
+            query = urllib.parse.urlencode({"code": code})
+            auth_url = f"{endpoint}/api_tokens?{query}"
+            if Confirm.ask(
+                f"Would you like to open [blue]{auth_url}[/] in your browser?",
+                default=True,
+            ):
+                if webbrowser.open_new_tab(auth_url):
+                    rich.print(
+                        f":white_check_mark: Opened [blue]{auth_url}[/] in your web browser."
+                    )
+                else:
+                    rich.print(
+                        f":police_car_light: Failed to open browser. Try creating a new API token at [blue]{auth_url}[/] yourself"
+                    )
+            else:
+                rich.print(
+                    f":backhand_index_pointing_right: Open [blue]{auth_url}[/] yourself..."
+                )
+            rich.print(":hourglass: Waiting for authentication...")
+            while True:
+                resp = httpx.get(token_url, params={"code": code})
+                if resp.is_success:
+                    api_token = resp.json()["token"]
+                    break
+                logger.debug(
+                    "Failed to obtain token(%s): %s", resp.status_code, resp.text
+                )
+                time.sleep(1)
+        elif choice == "paste":
+            api_token = Prompt.ask(":key: Paste your API token", password=True)
+    try:
+        cloud_rest_client = RestApiClient(endpoint, api_token)
+        user = cloud_rest_client.v1.get_current_user()
 
-    if org is None:
-        raise CLIException("current organization is not found")
+        if user is None:
+            raise CLIException("The current user is not found")
 
-    ctx = CloudClientContext(
-        name=shared_options.cloud_context
-        if shared_options.cloud_context is not None
-        else default_context_name,
-        endpoint=endpoint,
-        api_token=api_token,
-        email=user.email,
-    )
+        org = cloud_rest_client.v1.get_current_organization()
 
-    add_context(ctx)
-    click.echo(f"Successfully logged in to Cloud for {user.name} in {org.name}")
+        if org is None:
+            raise CLIException("The current organization is not found")
+
+        current_context_name = CloudClientConfig.get_config().current_context_name
+        cloud_context = BentoMLContainer.cloud_context.get()
+
+        ctx = CloudClientContext(
+            name=cloud_context if cloud_context is not None else current_context_name,
+            endpoint=endpoint,
+            api_token=api_token,
+            email=user.email,
+        )
+
+        ctx.save()
+        rich.print(
+            f":white_check_mark: Configured BentoCloud credentials (current-context: {ctx.name})"
+        )
+        rich.print(
+            f":white_check_mark: Logged in as [blue]{user.email}[/] at [blue]{org.name}[/] organization"
+        )
+    except CloudRESTApiClientError as e:
+        if e.error_code == 401:
+            rich.print(
+                f":police_car_light: Error validating token: HTTP 401: Bad credentials ({endpoint}/api-token)",
+                file=sys.stderr,
+            )
+        else:
+            rich.print(
+                f":police_car_light: Error validating token: HTTP {e.error_code}",
+                file=sys.stderr,
+            )
+        raise SystemExit(1)
 
 
 @cloud_command.command()
 def current_context() -> None:  # type: ignore (not accessed)
     """Get current cloud context."""
-    click.echo(
-        json.dumps(
-            bentoml_cattr.unstructure(
-                CloudClientConfig.get_config().get_current_context()
-            ),
-            indent=2,
-        )
+    rich.print_json(
+        data=bentoml_cattr.unstructure(CloudClientConfig.get_config().get_context())
     )
 
 
@@ -82,11 +161,7 @@ def current_context() -> None:  # type: ignore (not accessed)
 def list_context() -> None:  # type: ignore (not accessed)
     """List all available context."""
     config = CloudClientConfig.get_config()
-    click.echo(
-        json.dumps(
-            bentoml_cattr.unstructure([i.name for i in config.contexts]), indent=2
-        )
-    )
+    rich.print_json(data=bentoml_cattr.unstructure([i.name for i in config.contexts]))
 
 
 @cloud_command.command()
@@ -94,4 +169,4 @@ def list_context() -> None:  # type: ignore (not accessed)
 def update_current_context(context_name: str) -> None:  # type: ignore (not accessed)
     """Update current context"""
     ctx = CloudClientConfig.get_config().set_current_context(context_name)
-    click.echo(f"Successfully switched to context: {ctx.name}")
+    rich.print(f"Successfully switched to context: {ctx.name}")

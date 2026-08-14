@@ -8,8 +8,6 @@ import logging
 import warnings
 from typing import TYPE_CHECKING
 
-import fs
-
 from ..container.generate import generate_containerfile
 
 if TYPE_CHECKING:
@@ -30,11 +28,11 @@ warnings.warn(
 def generate_dockerfile(docker: DockerOptions, context_path: str, *, use_conda: bool):
     from ..bento import Bento
 
-    bento = Bento.from_fs(fs.open_fs(context_path))
+    bento = Bento.from_path(context_path)
     logger.debug("'use_conda' is deprecated and will not be used.")
     return generate_containerfile(
         docker,
         bento.path,
         conda=bento.info.conda,
-        bento_fs=bento._fs,
+        bento_fs=bento._path,
     )

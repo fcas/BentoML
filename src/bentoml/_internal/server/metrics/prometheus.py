@@ -2,24 +2,20 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 import typing as t
 from functools import partial
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from prometheus_client import Metric
+
     from ... import external_typing as ext
 
 logger = logging.getLogger(__name__)
 
 
 class PrometheusClient:
-    def __init__(
-        self,
-        *,
-        multiproc: bool = True,
-        multiproc_dir: str | None = None,
-    ):
+    def __init__(self, *, multiproc: bool = True):
         """
         PrometheusClient is BentoML's own prometheus client that extends the official Python client.
 
@@ -34,31 +30,13 @@ class PrometheusClient:
 
         For API documentation, refer to https://docs.bentoml.com/en/latest/reference/metrics.html.
         """
-        if multiproc:
-            assert multiproc_dir is not None, "multiproc_dir must be provided"
-
         self.multiproc = multiproc
-        self.multiproc_dir: str | None = multiproc_dir
         self._registry = None
         self._imported = False
         self._pid: int | None = None
 
     @property
     def prometheus_client(self):
-        if self.multiproc and not self._imported:
-            # step 1: check environment
-            assert (
-                "prometheus_client" not in sys.modules
-            ), "prometheus_client is already imported, multiprocessing will not work properly"
-
-            assert (
-                self.multiproc_dir
-            ), f"Invalid prometheus multiproc directory: {self.multiproc_dir}"
-            assert os.path.isdir(self.multiproc_dir)
-
-            os.environ["PROMETHEUS_MULTIPROC_DIR"] = self.multiproc_dir
-
-        # step 2:
         import prometheus_client
         import prometheus_client.exposition
         import prometheus_client.metrics
@@ -78,9 +56,9 @@ class PrometheusClient:
         else:
             if self.multiproc:
                 assert self._pid is not None
-                assert (
-                    os.getpid() == self._pid
-                ), "The current process's different than the process which the prometheus client gets created"
+                assert os.getpid() == self._pid, (
+                    "The current process's different than the process which the prometheus client gets created"
+                )
 
         return self._registry
 
@@ -90,9 +68,9 @@ class PrometheusClient:
     def mark_process_dead(self) -> None:
         if self.multiproc:
             assert self._pid is not None
-            assert (
-                os.getpid() == self._pid
-            ), "The current process's different than the process which the prometheus client gets created"
+            assert os.getpid() == self._pid, (
+                "The current process's different than the process which the prometheus client gets created"
+            )
             self.prometheus_client.multiprocess.mark_process_dead(self._pid)
 
     def start_http_server(self, port: int, addr: str = "") -> None:
@@ -123,9 +101,33 @@ class PrometheusClient:
         if self.multiproc:
             registry = self.prometheus_client.CollectorRegistry()
             self.prometheus_client.multiprocess.MultiProcessCollector(registry)
+            # Reorder histogram samples to match the Prometheus exposition format:
+            # _bucket entries first, then _count, then _sum.
+            # MultiProcessCollector produces _sum/_count before _bucket due to
+            # dict insertion order in its accumulation logic.
+            for metric in registry.collect():
+                if metric.type == "histogram":
+                    metric.samples.sort(key=self._histogram_sample_sort_key)
             return self.prometheus_client.generate_latest(registry)
         else:
             return self.prometheus_client.generate_latest()
+
+    @staticmethod
+    def _histogram_sample_sort_key(
+        sample: t.Any,
+    ) -> tuple[tuple[tuple[str, str], ...], int, float]:
+        # Group by all labels except 'le', then order: _bucket (0), _count (1), _sum (2)
+        non_le_labels = tuple(
+            (k, v) for k, v in sorted(sample.labels.items()) if k != "le"
+        )
+        if sample.name.endswith("_bucket"):
+            le_value = float(sample.labels.get("le", 0))
+            return (non_le_labels, 0, le_value)
+        elif sample.name.endswith("_count"):
+            return (non_le_labels, 1, 0)
+        elif sample.name.endswith("_sum"):
+            return (non_le_labels, 2, 0)
+        return (non_le_labels, 3, 0)
 
     def text_string_to_metric_families(self) -> t.Generator[Metric, None, None]:
         yield from self.prometheus_client.parser.text_string_to_metric_families(
@@ -173,6 +175,10 @@ class PrometheusClient:
         """
         A Metric family and its samples.
 
-        This is a base class to be used by instrumentation client. Custom collectors should use ``bentoml.metrics.metrics_core.GaugeMetricFamily``, ``bentoml.metrics.metrics_core.CounterMetricFamily``, ``bentoml.metrics.metrics_core.SummaryMetricFamily`` instead.
+        This is a base class to be used by instrumentation client.
+        Custom collectors should use
+        ``prometheus_client.metrics_core.GaugeMetricFamily``,
+        ``prometheus_client.metrics_core.CounterMetricFamily``,
+        ``prometheus_client.metrics_core.SummaryMetricFamily`` instead.
         """
         return partial(self.prometheus_client.Metric, registry=self.registry)

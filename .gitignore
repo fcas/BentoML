@@ -108,7 +108,6 @@ tests/integration/data
 *~
 
 # setuptools_scm generated version file
-typings
 **/*/_version.py
 
 # test files
@@ -167,3 +166,6 @@ mlruns/
 .pdm-python
 .python-version
 .pdm-build/
+
+# gradio flag
+flagged/

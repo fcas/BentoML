@@ -7,7 +7,6 @@ from numbers import Real
 
 import schema as s
 
-from ...utils.metrics import DEFAULT_BUCKET
 from ...utils.unflatten import unflatten
 from ..helpers import depth
 from ..helpers import ensure_iterable_type
@@ -72,14 +71,16 @@ _SERVICE_CONFIG = {
     # in configuration for a specific runner, it will override the global configuration.
     s.Optional("resources"): s.Or(
         {
-            s.Optional("cpu"): str,
-            s.Optional("memory"): str,
+            s.Optional("cpu"): s.Or(str, int, float),
+            s.Optional("memory"): s.Or(str, int, float),
             s.Optional("gpu"): s.And(Real, ensure_larger_than_zero),
             s.Optional("gpu_type"): str,
             s.Optional("tpu_type"): str,
         },
         None,
     ),
+    s.Optional("extra_ports"): s.Or([int], None),
+    s.Optional("replicate_process"): bool,
     s.Optional("workers"): s.Or(
         lambda s: s == "cpu_count",
         s.And(int, ensure_larger_than_zero),
@@ -94,13 +95,15 @@ _SERVICE_CONFIG = {
     },
     s.Optional("backlog"): s.And(int, ensure_larger_than(64)),
     s.Optional("max_runner_connections"): s.And(int, ensure_larger_than_zero),
+    s.Optional("runner_connection"): {
+        s.Optional("max_requests"): s.And(int, ensure_larger_than_zero),
+        s.Optional("max_age"): s.And(float, ensure_larger_than_zero),
+    },
     s.Optional("metrics"): {
         "enabled": bool,
         "namespace": str,
         s.Optional("duration"): {
-            s.Optional("buckets", default=DEFAULT_BUCKET): s.Or(
-                s.And(list, ensure_iterable_type(float)), None
-            ),
+            s.Optional("buckets"): s.Or(s.And(list, ensure_iterable_type(float)), None),
             s.Optional("min"): s.Or(s.And(float, ensure_larger_than_zero), None),
             s.Optional("max"): s.Or(s.And(float, ensure_larger_than_zero), None),
             s.Optional("factor"): s.Or(s.And(float, ensure_larger_than(1.0)), None),
@@ -123,6 +126,7 @@ _SERVICE_CONFIG = {
     s.Optional("http"): {
         "host": s.And(str, is_valid_ip_address),
         "port": s.And(int, ensure_larger_than_zero),
+        "proxy_port": s.And(int, ensure_larger_than_zero),
         "cors": {
             "enabled": bool,
             "access_control_allow_origins": s.Or([str], str, None),
@@ -198,7 +202,7 @@ def migration(*, override_config: dict[str, t.Any]):
 
 
 def finalize_config(config: dict[str, t.Any]) -> dict[str, t.Any]:
-    from ..containers import config_merger
+    from ...utils import deep_merge
 
     SERVICE_CFG_KEYS = [
         "batching",
@@ -226,6 +230,6 @@ def finalize_config(config: dict[str, t.Any]) -> dict[str, t.Any]:
     for svc, service_config in config["services"].items():
         if svc in SERVICE_CFG_KEYS:
             continue
-        config["services"][svc] = config_merger.merge(
+        config["services"][svc] = deep_merge(
             deepcopy(default_service_config), service_config
         )

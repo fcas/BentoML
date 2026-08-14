@@ -17,6 +17,41 @@ from typing_extensions import TypedDict
 
 Posint = Annotated[int, Gt(0)]
 Posfloat = Annotated[float, Gt(0.0)]
+GpuLiteralType = Literal[
+    "nvidia-b200",
+    "nvidia-gb200",
+    "nvidia-rtx-pro-6000",
+    "nvidia-h200-141gb",
+    "nvidia-tesla-h100",
+    "nvidia-tesla-t4",
+    "nvidia-tesla-a100",
+    "nvidia-a100-80gb",
+    "nvidia-h100-80gb",
+    "nvidia-a10g",
+    "nvidia-l4",
+    "nvidia-tesla-v100",
+    "nvidia-tesla-p100",
+    "nvidia-tesla-k80",
+    "nvidia-tesla-p4",
+    "amd-mi300x",
+    "amd-mi325x",
+    "amd-mi355x",
+]
+TpuLiteralType = Literal[
+    "v4-2x2x1",
+    "v4-2x2x2",
+    "v4-2x2x4",
+    "v4-2x4x4",
+    "v5p-2x2x1",
+    "v5p-2x2x2",
+    "v5p-2x2x4",
+    "v5p-2x4x4",
+    "v5e-1x1",
+    "v5e-2x2",
+    "v5e-2x4",
+    "v5e-4x4",
+    "v5e-4x8",
+]
 
 
 class TrafficSchema(TypedDict, total=False):
@@ -28,39 +63,41 @@ class TrafficSchema(TypedDict, total=False):
 
 
 class ResourceSchema(TypedDict, total=False):
-    cpu: str
-    memory: str
+    """
+    cpu: str | Posint | Posfloat
+        CPU resource requirement.
+        If int or float: Value is interpreted as number of cores.
+        If str: You can include unit (e.g., '100m', '0.5').
+        Default unit (for int/float): cores
+    Examples:
+        cpu:
+            1       -> 1 core
+            0.5     -> 0.5 cores
+            '100m'  -> 100 millicores
+            '2'     -> 2 cores
+    """
+
+    cpu: Union[str, Posint, Posfloat]
+    """
+    memory: Union[str, Posint, Posfloat]
+        Memory resource requirement.
+        If int or float: Value is interpreted as number of Gibibytes (Gi).
+        If str: You can include unit (e.g., '512Mi', '2Gi', '1').
+        Default unit (for int/float): Gi (Gibibytes)
+    memory:
+        1       -> 1Gi (1 Gibibyte)
+        1.5     -> 1.5Gi (1.5 Gibibytes)
+        '512Mi' -> 512 Mebibytes
+        '2Gi'   -> 2 Gibibytes
+    """
+    memory: Union[str, Posint, Posfloat]
     gpu: Posfloat
     """
-    gpu type defined here is only a anotation, it will use as an recommendation choice of instance type when deploying this service to bentocloud
+    gpu type defined here is only a annotation, it will use as an recommendation choice of instance type when deploying this service to bentocloud
     gpu_type follows the naming convention of AWS EC2 GPU instances, GCP GPU instances etc.
     """
-    gpu_type: Literal[
-        "nvidia-tesla-t4",
-        "nvidia-tesla-a100",
-        "nvidia-a100-80gb",
-        "nvidia-a10g",
-        "nvidia-l4",
-        "nvidia-tesla-v100",
-        "nvidia-tesla-p100",
-        "nvidia-tesla-k80",
-        "nvidia-tesla-p4",
-    ]
-    tpu_type: Literal[
-        "v4-2x2x1",
-        "v4-2x2x2",
-        "v4-2x2x4",
-        "v4-2x4x4",
-        "v5p-2x2x1",
-        "v5p-2x2x2",
-        "v5p-2x2x4",
-        "v5p-2x4x4",
-        "v5e-1x1",
-        "v5e-2x2",
-        "v5e-2x4",
-        "v5e-4x4",
-        "v5e-4x8",
-    ]
+    gpu_type: GpuLiteralType
+    tpu_type: TpuLiteralType
 
 
 WorkerSchema = Union[Posint, Literal["cpu_count"]]
@@ -116,6 +153,7 @@ class HTTPCorsSchema(TypedDict, total=False):
 class HTTPSchema(TypedDict, total=False):
     host: IPvAnyAddress
     port: int
+    proxy_port: int
     cors: HTTPCorsSchema
     response: TypedDict("HTTPResponseSchema", {"trace_id": bool}, total=False)  # type: ignore
 
@@ -190,6 +228,11 @@ class OTLPSchema(TypedDict, total=False):
     )  # type: ignore
 
 
+class RunnerConnectionSchema(TypedDict, total=False):
+    max_requests: Posint
+    max_age: Posfloat
+
+
 class TracingSchema(TypedDict, total=False):
     exporter_type: Literal["zipkin", "jaeger", "otlp", "in_memory"]
     sample_rate: Annotated[float, Ge(0.0), Le(1.0)]
@@ -205,18 +248,24 @@ class LoggingSchema(TypedDict, total=False):
     access: AccessLoggingSchema
 
 
-"""
-service level (per replica) config
-"""
+class EndpointsSchema(TypedDict, total=False):
+    livez: str
+    readyz: str
 
 
 class ServiceConfig(TypedDict, total=False):
-    name: str
+    """
+    service level (per replica) config
+    """
+
     traffic: TrafficSchema
+    extra_ports: list[int]
     backlog: Annotated[int, Ge(64)]
     max_runner_connections: Posint
+    runner_connection: RunnerConnectionSchema
     resources: ResourceSchema
     workers: WorkerSchema
+    replicate_process: bool
     threads: Posint
     metrics: MetricSchema
     logging: LoggingSchema
@@ -226,6 +275,7 @@ class ServiceConfig(TypedDict, total=False):
     runner_probe: RunnerProbeSchema
     tracing: TracingSchema
     monitoring: MonitoringSchema
+    endpoints: EndpointsSchema
 
 
 schema_type = TypeAdapter(ServiceConfig)

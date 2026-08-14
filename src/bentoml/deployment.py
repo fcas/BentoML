@@ -10,27 +10,28 @@ import attr
 from simple_di import Provide
 from simple_di import inject
 
-from bentoml._internal.cloud.deployment import Deployment
-from bentoml._internal.cloud.deployment import DeploymentConfigParameters
-from bentoml._internal.cloud.deployment import DeploymentInfo
-from bentoml._internal.cloud.schemas.modelschemas import EnvItemSchema
-from bentoml._internal.tag import Tag
-from bentoml.exceptions import BentoMLException
-
+from ._internal.bento import Bento
+from ._internal.cloud.deployment import Deployment
+from ._internal.cloud.deployment import DeploymentConfigParameters
+from ._internal.cloud.schemas.modelschemas import EnvItemSchema
+from ._internal.cloud.schemas.modelschemas import LabelItemSchema
 from ._internal.configuration.containers import BentoMLContainer
+from ._internal.tag import Tag
+from .exceptions import BentoMLException
+from .exceptions import NotFound
 
 if t.TYPE_CHECKING:
-    from ._internal.bento import BentoStore
+    from ._internal.cloud import BentoCloudClient
+
+BentoType = t.Union[str, Tag, Bento]
 
 
 @t.overload
 def create(
     name: str | None = ...,
     path_context: str | None = ...,
-    context: str | None = ...,
-    _bento_store: BentoStore = Provide[BentoMLContainer.bento_store],
     *,
-    bento: Tag | str | None = ...,
+    bento: BentoType | None = ...,
     cluster: str | None = ...,
     access_authorization: bool | None = ...,
     scaling_min: int | None = ...,
@@ -38,42 +39,38 @@ def create(
     instance_type: str | None = ...,
     strategy: str | None = ...,
     envs: t.List[EnvItemSchema] | t.List[dict[str, t.Any]] | None = ...,
+    secrets: t.List[str] | None = ...,
+    labels: t.List[LabelItemSchema] | t.List[dict[str, str]] | None = ...,
     extras: dict[str, t.Any] | None = ...,
-) -> DeploymentInfo: ...
+) -> Deployment: ...
 
 
 @t.overload
 def create(
     name: str | None = ...,
     path_context: str | None = ...,
-    context: str | None = ...,
-    _bento_store: BentoStore = Provide[BentoMLContainer.bento_store],
     *,
-    bento: Tag | str | None = ...,
+    bento: BentoType | None = ...,
     config_file: str | None = ...,
-) -> DeploymentInfo: ...
+) -> Deployment: ...
 
 
 @t.overload
 def create(
     name: str | None = ...,
     path_context: str | None = ...,
-    context: str | None = ...,
-    _bento_store: BentoStore = Provide[BentoMLContainer.bento_store],
     *,
-    bento: Tag | str | None = ...,
+    bento: BentoType | None = ...,
     config_dict: dict[str, t.Any] | None = ...,
-) -> DeploymentInfo: ...
+) -> Deployment: ...
 
 
 @inject
 def create(
     name: str | None = None,
     path_context: str | None = None,
-    context: str | None = None,
-    _bento_store: BentoStore = Provide[BentoMLContainer.bento_store],
     *,
-    bento: Tag | str | None = None,
+    bento: BentoType | None = None,
     cluster: str | None = None,
     access_authorization: bool | None = None,
     scaling_min: int | None = None,
@@ -81,15 +78,22 @@ def create(
     instance_type: str | None = None,
     strategy: str | None = None,
     envs: t.List[EnvItemSchema] | t.List[dict[str, t.Any]] | None = None,
+    labels: t.List[LabelItemSchema] | t.List[dict[str, str]] | None = None,
+    secrets: t.List[str] | None = None,
     extras: dict[str, t.Any] | None = None,
     config_dict: dict[str, t.Any] | None = None,
     config_file: str | None = None,
-) -> DeploymentInfo:
+    args: dict[str, t.Any] | None = None,
+    _cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
+) -> Deployment:
+    from ._internal.utils.args import set_arguments
+
+    if args is not None:
+        set_arguments(args)
     config_params = DeploymentConfigParameters(
         name=name,
         path_context=path_context,
-        context=context,
-        bento=bento,
+        bento=bento.tag if isinstance(bento, Bento) else bento,
         cluster=cluster,
         access_authorization=access_authorization,
         scaling_max=scaling_max,
@@ -104,76 +108,75 @@ def create(
             if envs is not None
             else None
         ),
+        labels=(
+            [
+                attr.asdict(item) if isinstance(item, LabelItemSchema) else item
+                for item in labels
+            ]
+            if labels is not None
+            else None
+        ),
+        secrets=secrets,
         extras=extras,
         config_dict=config_dict,
         config_file=config_file,
     )
     try:
-        config_params.verify()
+        config_params.verify(_client=_cloud_client.client)
     except BentoMLException as e:
         raise BentoMLException(
             f"Failed to create deployment due to invalid configuration: {e}"
         )
-    return Deployment.create(
-        deployment_config_params=config_params,
-        context=context,
-    )
+    return _cloud_client.deployment.create(deployment_config_params=config_params)
 
 
 @t.overload
 def update(
     name: str | None = ...,
     path_context: str | None = ...,
-    context: str | None = ...,
     cluster: str | None = ...,
-    _bento_store: BentoStore = Provide[BentoMLContainer.bento_store],
     *,
-    bento: Tag | str | None = ...,
+    bento: BentoType | None = ...,
     access_authorization: bool | None = ...,
     scaling_min: int | None = ...,
     scaling_max: int | None = ...,
     instance_type: str | None = ...,
     strategy: str | None = ...,
     envs: t.List[EnvItemSchema] | t.List[dict[str, t.Any]] | None = ...,
+    secrets: t.List[str] | None = ...,
     extras: dict[str, t.Any] | None = ...,
-) -> DeploymentInfo: ...
+) -> Deployment: ...
 
 
 @t.overload
 def update(
     name: str | None = ...,
     path_context: str | None = ...,
-    context: str | None = ...,
     cluster: str | None = None,
-    _bento_store: BentoStore = Provide[BentoMLContainer.bento_store],
     *,
-    bento: Tag | str | None = ...,
+    bento: BentoType | None = ...,
     config_file: str | None = ...,
-) -> DeploymentInfo: ...
+) -> Deployment: ...
 
 
 @t.overload
 def update(
     name: str | None = ...,
     path_context: str | None = ...,
-    context: str | None = ...,
     cluster: str | None = None,
-    _bento_store: BentoStore = Provide[BentoMLContainer.bento_store],
     *,
-    bento: Tag | str | None = ...,
+    bento: BentoType | None = ...,
     config_dict: dict[str, t.Any] | None = ...,
-) -> DeploymentInfo: ...
+) -> Deployment: ...
 
 
 @inject
 def update(
     name: str | None = None,
     path_context: str | None = None,
-    context: str | None = None,
     cluster: str | None = None,
-    _bento_store: BentoStore = Provide[BentoMLContainer.bento_store],
     *,
-    bento: Tag | str | None = None,
+    bento: BentoType | None = None,
     access_authorization: bool | None = None,
     scaling_min: int | None = None,
     scaling_max: int | None = None,
@@ -185,15 +188,19 @@ def update(
         | t.List[dict[str, t.Any]]
         | None
     ) = None,
+    labels: (
+        t.List[LabelItemSchema] | t.List[dict[str, str]] | t.List[dict[str, str]] | None
+    ) = None,
+    secrets: t.List[str] | None = None,
     extras: dict[str, t.Any] | None = None,
     config_dict: dict[str, t.Any] | None = None,
     config_file: str | None = None,
-) -> DeploymentInfo:
+    _cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
+) -> Deployment:
     config_params = DeploymentConfigParameters(
         name=name,
         path_context=path_context,
-        context=context,
-        bento=bento,
+        bento=bento.tag if isinstance(bento, Bento) else bento,
         cluster=cluster,
         access_authorization=access_authorization,
         scaling_max=scaling_max,
@@ -208,21 +215,27 @@ def update(
             if envs is not None
             else None
         ),
+        labels=(
+            [
+                attr.asdict(item) if isinstance(item, LabelItemSchema) else item
+                for item in labels
+            ]
+            if labels is not None
+            else None
+        ),
+        secrets=secrets,
         extras=extras,
         config_dict=config_dict,
         config_file=config_file,
     )
     try:
-        config_params.verify()
+        config_params.verify(create=False, _client=_cloud_client.client)
     except BentoMLException as e:
         raise BentoMLException(
             f"Failed to create deployment due to invalid configuration: {e}"
         )
 
-    return Deployment.update(
-        deployment_config_params=config_params,
-        context=context,
-    )
+    return _cloud_client.deployment.update(deployment_config_params=config_params)
 
 
 @t.overload
@@ -230,12 +243,10 @@ def apply(
     name: str | None = ...,
     cluster: t.Optional[str] = ...,
     path_context: t.Optional[str] = ...,
-    context: t.Optional[str] = ...,
-    _bento_store: BentoStore = Provide[BentoMLContainer.bento_store],
     *,
     bento: t.Optional[t.Union[Tag, str]] = ...,
     config_dict: t.Optional[dict[str, t.Any]] = ...,
-) -> DeploymentInfo: ...
+) -> Deployment: ...
 
 
 @t.overload
@@ -243,12 +254,10 @@ def apply(
     name: str | None = ...,
     cluster: t.Optional[str] = ...,
     path_context: t.Optional[str] = ...,
-    context: t.Optional[str] = ...,
-    _bento_store: BentoStore = Provide[BentoMLContainer.bento_store],
     *,
     bento: t.Optional[t.Union[Tag, str]] = ...,
     config_file: t.Optional[str] = ...,
-) -> DeploymentInfo: ...
+) -> Deployment: ...
 
 
 @inject
@@ -256,77 +265,114 @@ def apply(
     name: str | None = None,
     cluster: str | None = None,
     path_context: str | None = None,
-    context: str | None = None,
-    _bento_store: BentoStore = Provide[BentoMLContainer.bento_store],
     *,
-    bento: Tag | str | None = None,
+    bento: BentoType | None = None,
     config_dict: dict[str, t.Any] | None = None,
     config_file: str | None = None,
-) -> DeploymentInfo:
+    _cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
+) -> Deployment:
     config_params = DeploymentConfigParameters(
         name=name,
         path_context=path_context,
-        context=context,
-        bento=bento,
+        bento=bento.tag if isinstance(bento, Bento) else bento,
         cluster=cluster,
         config_dict=config_dict,
         config_file=config_file,
     )
     try:
-        config_params.verify()
+        config_params.verify(create=False, _client=_cloud_client.client)
     except BentoMLException as e:
         raise BentoMLException(
             f"Failed to create deployment due to invalid configuration: {e}"
         )
 
-    return Deployment.apply(
-        deployment_config_params=config_params,
-        context=context,
-    )
+    return _cloud_client.deployment.apply(deployment_config_params=config_params)
 
 
+@inject
 def get(
     name: str,
-    context: str | None = None,
     cluster: str | None = None,
-) -> DeploymentInfo:
-    return Deployment.get(
-        name=name,
-        context=context,
-        cluster=cluster,
-    )
+    _cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
+) -> Deployment:
+    return _cloud_client.deployment.get(name=name, cluster=cluster)
 
 
+@inject
 def terminate(
     name: str,
-    context: str | None = None,
     cluster: str | None = None,
-) -> DeploymentInfo:
-    return Deployment.terminate(
-        name=name,
-        context=context,
-        cluster=cluster,
-    )
+    wait: bool = False,
+    _cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
+) -> Deployment:
+    return _cloud_client.deployment.terminate(name=name, cluster=cluster, wait=wait)
 
 
+@inject
+def start(
+    name: str,
+    cluster: str | None = None,
+    _cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
+) -> Deployment:
+    """Start a terminated deployment by updating it with no configuration changes.
+
+    Returns:
+        Deployment: The updated deployment
+    """
+    from ._internal.cloud.schemas.modelschemas import DeploymentStatus
+
+    # First check if deployment exists and get its status
+    try:
+        deployment = get(name=name, cluster=cluster)
+        status = deployment.get_status(refetch=True).status
+    except Exception as e:
+        if "not found" in str(e).lower():
+            raise NotFound(f"Deployment '{name}' not found.") from e
+        raise
+    else:
+        if status != DeploymentStatus.Terminated.value:
+            raise BentoMLException(
+                f"Deployment '{name}' is not terminated (current status: {status}). Only terminated deployments can be started.",
+            )
+
+    config_params = DeploymentConfigParameters(name=name, cluster=cluster)
+    return _cloud_client.deployment.update(deployment_config_params=config_params)
+
+
+@inject
 def delete(
     name: str,
-    context: str | None = None,
     cluster: str | None = None,
+    _cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
 ) -> None:
-    Deployment.delete(
-        name=name,
-        context=context,
-        cluster=cluster,
-    )
+    _cloud_client.deployment.delete(name=name, cluster=cluster)
 
 
+@inject
 def list(
-    context: str | None = None,
     cluster: str | None = None,
     search: str | None = None,
-) -> t.List[DeploymentInfo]:
-    return Deployment.list(context=context, cluster=cluster, search=search)
+    dev: bool = False,
+    q: str | None = None,
+    labels: t.List[LabelItemSchema] | t.List[dict[str, t.Any]] | None = None,
+    _cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
+) -> t.List[Deployment]:
+    # Syntatic sugar to enable searching by `labels` argument
+    if labels is not None:
+        label_query = " ".join(
+            f"label:{d['key']}={d['value']}"
+            for d in (
+                label if isinstance(label, dict) else attr.asdict(label)
+                for label in labels
+            )
+        )
+
+        if q is not None:
+            q = f"{q} {label_query}"
+        else:
+            q = label_query
+
+    return _cloud_client.deployment.list(cluster=cluster, search=search, dev=dev, q=q)
 
 
-__all__ = ["create", "get", "update", "apply", "terminate", "delete", "list"]
+__all__ = ["create", "get", "update", "apply", "terminate", "start", "delete", "list"]

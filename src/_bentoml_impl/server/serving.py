@@ -9,15 +9,17 @@ import pathlib
 import platform
 import shutil
 import socket
+import sys
 import tempfile
 import typing as t
 
-import attrs
 from simple_di import Provide
 from simple_di import inject
 
 from _bentoml_sdk import Service
 from bentoml._internal.container import BentoMLContainer
+from bentoml._internal.utils import reserve_free_port
+from bentoml._internal.utils.circus import Server
 from bentoml.exceptions import BentoMLConfigException
 
 AnyService = Service[t.Any]
@@ -25,8 +27,6 @@ AnyService = Service[t.Any]
 if t.TYPE_CHECKING:
     from circus.sockets import CircusSocket
     from circus.watcher import Watcher
-
-    from bentoml._internal.utils.circus import Arbiter
 
     from .allocator import ResourceAllocator
 
@@ -38,36 +38,18 @@ API_SERVER_NAME = "_bento_api_server"
 MAX_AF_UNIX_PATH_LENGTH = 103
 logger = logging.getLogger("bentoml.serve")
 
-if POSIX and not IS_WSL:
 
-    def _get_server_socket(
-        service: AnyService,
-        uds_path: str,
-        port_stack: contextlib.ExitStack,
-        backlog: int,
-    ) -> tuple[str, CircusSocket]:
-        from circus.sockets import CircusSocket
+def _get_server_socket(
+    service: AnyService,
+    uds_path: str,
+    port_stack: contextlib.ExitStack,
+    backlog: int,
+) -> tuple[str, CircusSocket]:
+    from circus.sockets import CircusSocket
 
-        from bentoml._internal.utils.uri import path_to_uri
+    from bentoml._internal.utils.uri import path_to_uri
 
-        socket_path = os.path.join(uds_path, f"{id(service)}.sock")
-        assert len(socket_path) < MAX_AF_UNIX_PATH_LENGTH
-        return path_to_uri(socket_path), CircusSocket(
-            name=service.name, path=socket_path, backlog=backlog
-        )
-
-elif WINDOWS or IS_WSL:
-
-    def _get_server_socket(
-        service: AnyService,
-        uds_path: str,
-        port_stack: contextlib.ExitStack,
-        backlog: int,
-    ) -> tuple[str, CircusSocket]:
-        from circus.sockets import CircusSocket
-
-        from bentoml._internal.utils import reserve_free_port
-
+    if WINDOWS or IS_WSL or "BENTOML_NO_UDS" in os.environ:
         runner_port = port_stack.enter_context(reserve_free_port())
         runner_host = "127.0.0.1"
 
@@ -78,22 +60,17 @@ elif WINDOWS or IS_WSL:
             backlog=backlog,
         )
 
-else:
-
-    def _get_server_socket(
-        service: AnyService,
-        uds_path: str | None,
-        port_stack: contextlib.ExitStack,
-        backlog: int,
-    ) -> tuple[str, CircusSocket]:
-        from bentoml.exceptions import BentoMLException
-
-        raise BentoMLException("Unsupported platform")
+    socket_path = os.path.join(uds_path, f"{id(service)}.sock")
+    assert len(socket_path) < MAX_AF_UNIX_PATH_LENGTH
+    return path_to_uri(socket_path), CircusSocket(
+        name=service.name, path=socket_path, backlog=backlog
+    )
 
 
 _SERVICE_WORKER_SCRIPT = "_bentoml_impl.worker.service"
 
 
+@inject
 def create_dependency_watcher(
     bento_identifier: str,
     svc: AnyService,
@@ -102,10 +79,14 @@ def create_dependency_watcher(
     backlog: int,
     scheduler: ResourceAllocator,
     working_dir: str | None = None,
-) -> tuple[Watcher, CircusSocket, str]:
-    from bentoml.serve import create_watcher
+    env: dict[str, str] | None = None,
+    bento_args: dict[str, t.Any] = Provide[BentoMLContainer.bento_arguments],
+) -> tuple[Watcher, CircusSocket | None, str]:
+    from bentoml.exceptions import BentoMLException
+    from bentoml.serving import create_watcher
 
     num_workers, worker_envs = scheduler.get_worker_env(svc)
+    env = env or {}
     uri, socket = _get_server_socket(svc, uds_path, port_stack, backlog)
     args = [
         "-m",
@@ -117,28 +98,65 @@ def create_dependency_watcher(
         f"$(circus.sockets.{svc.name})",
         "--worker-id",
         "$(CIRCUS.WID)",
+        "--args",
+        json.dumps(bento_args),
     ]
+    cmd = sys.executable
 
-    if worker_envs:
-        args.extend(["--worker-env", json.dumps(worker_envs)])
+    # Process environment variables from the service
+    for env_var in svc.envs:
+        # Exclude Build Time environment variables
+        if env_var.stage == "build":
+            continue
+        if env_var.name in env:
+            continue
 
+        if env_var.name in os.environ:
+            env[env_var.name] = os.environ[env_var.name]
+        elif env_var.value:
+            env[env_var.name] = env_var.value
+        else:
+            raise BentoMLException(
+                f"Environment variable '{env_var.name}' is required but not set. "
+                f"Either set it in the environment or provide a default value in the service definition."
+            )
+
+    env.update(worker_envs)
     watcher = create_watcher(
         name=f"service_{svc.name}",
+        cmd=cmd,
         args=args,
         numprocesses=num_workers,
         working_dir=working_dir,
+        env=env,
     )
     return watcher, socket, uri
 
 
-def server_on_deployment(svc: AnyService) -> None:
+@inject
+def server_on_deployment(
+    svc: AnyService, result_file: str = Provide[BentoMLContainer.result_store_file]
+) -> None:
+    # Resolve models before server starts.
+    from ..tasks.result import Sqlite3Store
+
+    if bento := svc.bento:
+        for model in bento.info.all_models:
+            model.to_model().resolve()
+    else:
+        for model in svc.models:
+            model.resolve()
     for name in dir(svc.inner):
         member = getattr(svc.inner, name)
         if callable(member) and getattr(member, "__bentoml_deployment_hook__", False):
             member()
+    if svc.needs_task_db():
+        if os.path.exists(result_file):
+            os.remove(result_file)
+        Sqlite3Store.init_db(result_file)
 
 
-@inject
+@inject(squeeze_none=True)
 def serve_http(
     bento_identifier: str | AnyService,
     working_dir: str | None = None,
@@ -168,50 +186,82 @@ def serve_http(
     from bentoml._internal.utils import reserve_free_port
     from bentoml._internal.utils.analytics.usage_stats import track_serve
     from bentoml._internal.utils.circus import create_standalone_arbiter
-    from bentoml.serve import construct_ssl_args
-    from bentoml.serve import construct_timeouts_args
-    from bentoml.serve import create_watcher
-    from bentoml.serve import ensure_prometheus_dir
-    from bentoml.serve import make_reload_plugin
+    from bentoml.exceptions import BentoMLException
+    from bentoml.serving import construct_ssl_args
+    from bentoml.serving import construct_timeouts_args
+    from bentoml.serving import create_watcher
+    from bentoml.serving import ensure_prometheus_dir
+    from bentoml.serving import make_reload_plugin
 
-    from ..loader import import_service
-    from ..loader import normalize_identifier
+    from ..loader import load
     from .allocator import ResourceAllocator
 
-    prometheus_dir = ensure_prometheus_dir()
+    env = {"PROMETHEUS_MULTIPROC_DIR": ensure_prometheus_dir()}
     if isinstance(bento_identifier, Service):
         svc = bento_identifier
-        bento_identifier = svc.import_string
-        assert (
-            working_dir is None
-        ), "working_dir should not be set when passing a service in process"
-        # use cwd
-        bento_path = pathlib.Path(".")
-    else:
-        bento_identifier, bento_path = normalize_identifier(
-            bento_identifier, working_dir
+        assert working_dir is None, (
+            "working_dir should not be set when passing a service in process"
         )
+        bento_identifier = svc.import_string
+        bento_path = pathlib.Path(svc.working_dir)
+    else:
+        svc = load(bento_identifier, working_dir)
+        bento_path = pathlib.Path(working_dir or ".")
 
-        svc = import_service(bento_identifier, bento_path)
+    # Process environment variables from the service
+    for env_var in svc.envs:
+        # Exclude Build Time environment variables
+        if env_var.stage == "build":
+            continue
+        if env_var.name in env:
+            continue
+
+        if env_var.name in os.environ:
+            env[env_var.name] = os.environ[env_var.name]
+        elif env_var.value:
+            env[env_var.name] = env_var.value
+        else:
+            raise BentoMLException(
+                f"Environment variable '{env_var.name}' is required but not set. "
+                f"Either set it in the environment or provide a default value in the service definition."
+            )
 
     watchers: list[Watcher] = []
     sockets: list[CircusSocket] = []
     allocator = ResourceAllocator()
     if dependency_map is None:
         dependency_map = {}
-    if service_name:
-        svc = svc.find_dependent(service_name)
-    num_workers, worker_envs = allocator.get_worker_env(svc)
+    if service_name and service_name != svc.name:
+        svc = svc.find_dependent_by_name(service_name)
+    num_workers, worker_env = allocator.get_worker_env(svc)
     server_on_deployment(svc)
     uds_path = tempfile.mkdtemp(prefix="bentoml-uds-")
     try:
         if not service_name and not development_mode:
             with contextlib.ExitStack() as port_stack:
-                for name, dep_svc in svc.all_services().items():
-                    if name == svc.name:
+                for name, dep_svc in svc.all_services(exclude_urls=True).items():
+                    if name == svc.name or name in dependency_map:
                         continue
-                    if name in dependency_map:
-                        continue
+
+                    # Process environment variables for dependency services
+                    dependency_env = env.copy()
+                    for env_var in dep_svc.envs:
+                        # Exclude Build Time environment variables
+                        if env_var.stage == "build":
+                            continue
+                        if env_var.name in dependency_env:
+                            continue
+
+                        if env_var.value:
+                            dependency_env[env_var.name] = env_var.value
+                        elif env_var.name in os.environ:
+                            dependency_env[env_var.name] = os.environ[env_var.name]
+                        else:
+                            raise BentoMLException(
+                                f"Environment variable '{env_var.name}' is required for service '{name}' but not set. "
+                                f"Either set it in the environment or provide a default value in the service definition."
+                            )
+
                     new_watcher, new_socket, uri = create_dependency_watcher(
                         bento_identifier,
                         dep_svc,
@@ -220,9 +270,11 @@ def serve_http(
                         backlog,
                         allocator,
                         str(bento_path.absolute()),
+                        env={k: str(v) for k, v in dependency_env.items()},
                     )
                     watchers.append(new_watcher)
-                    sockets.append(new_socket)
+                    if new_socket:
+                        sockets.append(new_socket)
                     dependency_map[name] = uri
                     server_on_deployment(dep_svc)
                 # reserve one more to avoid conflicts
@@ -240,7 +292,8 @@ def serve_http(
                 )
         except ValueError as e:
             raise BentoMLConfigException(f"Invalid host IP address: {host}") from e
-
+        bento_args = BentoMLContainer.bento_arguments.get()
+        env.update(worker_env)
         sockets.append(
             CircusSocket(
                 name=API_SERVER_NAME,
@@ -250,6 +303,8 @@ def serve_http(
                 backlog=backlog,
             )
         )
+        if BentoMLContainer.ssl.enabled.get() and not ssl_certfile:
+            raise BentoMLConfigException("ssl_certfile is required when ssl is enabled")
 
         ssl_args = construct_ssl_args(
             ssl_certfile=ssl_certfile,
@@ -266,6 +321,7 @@ def serve_http(
         )
         timeout_args = ["--timeout", str(timeout)] if timeout else []
 
+        server_cmd = sys.executable
         server_args = [
             "-m",
             _SERVICE_WORKER_SCRIPT,
@@ -278,14 +334,12 @@ def serve_http(
             str(backlog),
             "--worker-id",
             "$(CIRCUS.WID)",
-            "--prometheus-dir",
-            prometheus_dir,
+            "--args",
+            json.dumps(bento_args),
             *ssl_args,
             *timeouts_args,
             *timeout_args,
         ]
-        if worker_envs:
-            server_args.extend(["--worker-env", json.dumps(worker_envs)])
         if development_mode:
             server_args.append("--development-mode")
 
@@ -293,10 +347,12 @@ def serve_http(
         watchers.append(
             create_watcher(
                 name="service",
+                cmd=server_cmd,
                 args=server_args,
                 working_dir=str(bento_path.absolute()),
                 numprocesses=num_workers,
                 close_child_stdin=not development_mode,
+                env={k: str(v) for k, v in env.items()},
             )
         )
 
@@ -324,7 +380,6 @@ def serve_http(
         if development_mode:
             arbiter_kwargs["debug"] = True
             arbiter_kwargs["loggerconfig"] = SERVER_LOGGING_CONFIG
-            arbiter_kwargs["loglevel"] = "WARNING"
 
         arbiter = create_standalone_arbiter(**arbiter_kwargs)
         arbiter.exit_stack.enter_context(
@@ -332,38 +387,20 @@ def serve_http(
         )
         arbiter.exit_stack.callback(shutil.rmtree, uds_path, ignore_errors=True)
         arbiter.start(
-            cb=lambda _: logger.info(  # type: ignore
-                'Starting production %s BentoServer from "%s" listening on %s://%s:%d (Press CTRL+C to quit)',
-                scheme.upper(),
-                bento_identifier,
-                scheme,
-                log_host,
-                port,
+            cb=lambda _: (
+                logger.info(  # type: ignore
+                    'Starting production %s BentoServer from "%s" listening on %s://%s:%d (Press CTRL+C to quit)',
+                    scheme.upper(),
+                    bento_identifier,
+                    scheme,
+                    log_host,
+                    port,
+                )
+                if not svc.has_custom_command()
+                else None
             ),
         )
         return Server(url=f"{scheme}://{log_host}:{port}", arbiter=arbiter)
     except Exception:
         shutil.rmtree(uds_path, ignore_errors=True)
         raise
-
-
-@attrs.frozen
-class Server:
-    url: str
-    arbiter: Arbiter = attrs.field(repr=False)
-
-    def start(self) -> None:
-        pass
-
-    def stop(self) -> None:
-        self.arbiter.stop()
-
-    @property
-    def running(self) -> bool:
-        return self.arbiter.running
-
-    def __enter__(self) -> Server:
-        return self
-
-    def __exit__(self, exc_type: t.Any, exc_value: t.Any, traceback: t.Any) -> None:
-        self.stop()

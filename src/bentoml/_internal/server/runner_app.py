@@ -25,6 +25,7 @@ from ..runner.utils import Params
 from ..runner.utils import payload_paramss_to_batch_params
 from ..server.base_app import BaseAppFactory
 from ..types import LazyType
+from ..utils import with_app_arg
 from ..utils.metrics import exponential_buckets
 
 feedback_logger = logging.getLogger("bentoml.feedback")
@@ -32,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from opentelemetry.sdk.trace import Span
+    from starlette.applications import Starlette
     from starlette.middleware import Middleware
     from starlette.requests import Request
     from starlette.responses import Response
@@ -69,17 +71,19 @@ class RunnerAppFactory(BaseAppFactory):
 
         for method in runner.runner_methods:
             max_batch_size = method.max_batch_size if method.config.batchable else -1
-            self.dispatchers[method.name] = CorkDispatcher(
-                max_latency_in_ms=method.max_latency_ms,
-                max_batch_size=max_batch_size,
-                fallback=fallback,
-            )
+            if max_batch_size > 1:
+                self.dispatchers[method.name] = CorkDispatcher(
+                    max_latency_in_ms=method.max_latency_ms,
+                    max_batch_size=max_batch_size,
+                    fallback=fallback,
+                    batch_dim=method.config.batch_dim,
+                )
 
     @property
     def name(self) -> str:
         return self.runner.name
 
-    def _init_metrics_wrappers(self):
+    def _init_metrics_wrappers(self, _: Starlette) -> None:
         metrics_client = BentoMLContainer.metrics_client.get()
 
         max_max_batch_size = max(
@@ -103,16 +107,18 @@ class RunnerAppFactory(BaseAppFactory):
     @property
     def on_startup(self) -> list[LifecycleHook]:
         on_startup = super().on_startup
-        on_startup.insert(0, functools.partial(self.runner.init_local, quiet=True))
+        on_startup.insert(
+            0, with_app_arg(functools.partial(self.runner.init_local, quiet=True))
+        )
         on_startup.insert(0, self._init_metrics_wrappers)
 
         return on_startup
 
     @property
     def on_shutdown(self) -> list[LifecycleHook]:
-        on_shutdown: list[LifecycleHook] = [self.runner.destroy]
+        on_shutdown: list[LifecycleHook] = [with_app_arg(self.runner.destroy)]
         for dispatcher in self.dispatchers.values():
-            on_shutdown.append(dispatcher.shutdown)
+            on_shutdown.append(with_app_arg(dispatcher.shutdown))
         on_shutdown.extend(super().on_shutdown)
         return on_shutdown
 
@@ -150,7 +156,7 @@ class RunnerAppFactory(BaseAppFactory):
         from opentelemetry.instrumentation.asgi import OpenTelemetryMiddleware
         from starlette.middleware import Middleware
 
-        def client_request_hook(span: Span | None, _scope: t.Dict[str, t.Any]) -> None:
+        def client_request_hook(span: Span | None, *_: t.Any) -> None:
             if span is not None:
                 trace_context.request_id = span.context.span_id
 
@@ -199,26 +205,24 @@ class RunnerAppFactory(BaseAppFactory):
 
         if runner_method.config.is_stream:
             # Streaming does not have batching implemented yet
-            async def infer_stream(
-                paramss: t.Sequence[Params[t.Any]],
-            ) -> t.Sequence[t.AsyncGenerator[str, None]]:
+            async def infer(
+                params: Params[t.Any],
+            ) -> t.Coroutine[None, None, t.AsyncGenerator[str, None]]:
                 async def inner():
                     # This is a workaround to allow infer stream to return a iterable of
                     # async generator, to align with how non stream inference works
-                    params = paramss[0].map(AutoContainer.from_payload)
+                    param = params.map(AutoContainer.from_payload)
                     try:
-                        ret = runner_method.async_stream(*params.args, **params.kwargs)
+                        ret = runner_method.async_stream(*param.args, **param.kwargs)
                     except Exception:
                         traceback.print_exc()
                         raise
                     async for data in ret:
                         yield data
 
-                return (inner(),)
-
-            infer = self.dispatchers[runner_method.name](infer_stream)
+                return inner()
         else:
-            if batching:
+            if runner_method.name in self.dispatchers:
 
                 async def infer_batch(
                     params_list: t.Sequence[Params[t.Any]],
@@ -271,12 +275,8 @@ class RunnerAppFactory(BaseAppFactory):
                 infer = self.dispatchers[runner_method.name](infer_batch)
             else:
 
-                async def infer_single(
-                    paramss: t.Sequence[Params[t.Any]],
-                ) -> tuple[Payload]:
-                    assert len(paramss) == 1
-
-                    params = paramss[0].map(AutoContainer.from_payload)
+                async def infer(params: Params[t.Any]) -> Payload:
+                    params = params.map(AutoContainer.from_payload)
 
                     try:
                         ret = await runner_method.async_run(
@@ -286,10 +286,7 @@ class RunnerAppFactory(BaseAppFactory):
                         traceback.print_exc()
                         raise
 
-                    payload = AutoContainer.to_payload(ret, 0)
-                    return (payload,)
-
-                infer = self.dispatchers[runner_method.name](infer_single)
+                    return AutoContainer.to_payload(ret, 0)
 
         async def _request_handler(request: Request) -> Response:
             assert self._is_ready

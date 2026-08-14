@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import typing as t
 
 import click
+import rich
 import yaml
 from rich.syntax import Syntax
 from rich.table import Table
@@ -11,13 +13,12 @@ from simple_di import Provide
 from simple_di import inject
 
 from bentoml import Tag
-from bentoml._internal.bento.bento import DEFAULT_BENTO_BUILD_FILE
+from bentoml._internal.bento.bento import DEFAULT_BENTO_BUILD_FILES
 from bentoml._internal.bento.build_config import BentoBuildConfig
 from bentoml._internal.container import BentoMLContainer
-from bentoml._internal.utils import calc_dir_size
 from bentoml._internal.utils import human_readable_size
-from bentoml._internal.utils import resolve_user_filepath
-from bentoml._internal.utils import rich_console as console
+from bentoml._internal.utils.filesystem import calc_dir_size
+from bentoml._internal.utils.filesystem import resolve_user_filepath
 from bentoml.exceptions import InvalidArgument
 from bentoml.models import import_model
 from bentoml_cli.utils import BentoMLCommandGroup
@@ -31,8 +32,6 @@ if t.TYPE_CHECKING:
     from bentoml._internal.bento import BentoStore
     from bentoml._internal.cloud import BentoCloudClient
     from bentoml._internal.models import ModelStore
-
-    from .utils import SharedOptions
 
 
 def parse_delete_targets_argument_callback(
@@ -86,14 +85,12 @@ def get(
     model = model_store.get(model_tag)
 
     if output == "path":
-        console.print(model.path)
+        rich.print(model.path)
     elif output == "json":
         info = json.dumps(model.info.to_dict(), indent=2, default=str)
-        console.print_json(info)
+        rich.print_json(info)
     else:
-        console.print(
-            Syntax(str(model.info.dump()), "yaml", background_color="default")
-        )
+        rich.print(Syntax(str(model.info.dump()), "yaml", background_color="default"))
 
 
 @model_command.command(name="list")
@@ -135,10 +132,10 @@ def list_models(
     ]
     if output == "json":
         info = json.dumps(res, indent=2)
-        console.print_json(info)
+        rich.print_json(info)
     elif output == "yaml":
         info = yaml.safe_dump(res, indent=2)
-        console.print(Syntax(info, "yaml"))
+        rich.print(Syntax(info, "yaml"))
     else:
         table = Table(box=None)
         table.add_column("Tag")
@@ -152,7 +149,7 @@ def list_models(
                 model["size"],
                 model["creation_time"],
             )
-        console.print(table)
+        rich.print(table)
 
 
 @model_command.command()
@@ -218,7 +215,7 @@ def delete(
             if delete_confirmed:
                 check_model_is_used(model.tag)
                 model_store.delete(model.tag)
-                click.echo(f"{model} deleted.")
+                rich.print(f"[green]{model}[/] deleted.")
 
     for target in delete_targets:
         delete_target(target)
@@ -253,7 +250,7 @@ def export(
     """
     bentomodel = model_store.get(model_tag)
     out_path = bentomodel.export(out_path)
-    click.echo(f"{bentomodel} exported to {out_path}.")
+    rich.print(f"[green]{bentomodel}[/] exported to {out_path}.")
 
 
 @model_command.command(name="import")
@@ -265,7 +262,7 @@ def import_from(model_path: str) -> None:  # type: ignore (not accessed)
     bentoml models import s3://mybucket/models/my_model.bentomodel
     """
     bentomodel = import_model(model_path)
-    click.echo(f"{bentomodel} imported.")
+    rich.print(f"[green]{bentomodel}[/] imported.")
 
 
 @model_command.command()
@@ -280,8 +277,6 @@ def import_from(model_path: str) -> None:  # type: ignore (not accessed)
 @click.option(
     "-F",
     "--bentofile",
-    type=click.STRING,
-    default=DEFAULT_BENTO_BUILD_FILE,
     help="Path to bentofile. Default to 'bentofile.yaml'",
 )
 @click.pass_context
@@ -290,7 +285,7 @@ def pull(
     ctx: click.Context,
     model_tag: str | None,
     force: bool,
-    bentofile: str,
+    bentofile: str | None,
     cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
 ):
     """Pull Model from a remote model store. If model_tag is not provided,
@@ -300,27 +295,35 @@ def pull(
 
     if model_tag is not None:
         if ctx.get_parameter_source("bentofile") != ParameterSource.DEFAULT:
-            click.echo("-f bentofile is ignored when model_tag is provided")
-        cloud_client.pull_model(model_tag, force=force, context=ctx.obj.cloud_context)
+            rich.print("-f bentofile is ignored when model_tag is provided")
+        cloud_client.model.pull(model_tag, force=force)
         return
 
-    try:
-        bentofile = resolve_user_filepath(bentofile, None)
-    except FileNotFoundError:
-        raise InvalidArgument(f'bentofile "{bentofile}" not found')
-
-    with open(bentofile, "r", encoding="utf-8") as f:
-        build_config = BentoBuildConfig.from_yaml(f)
+    if bentofile:
+        try:
+            bentofile = resolve_user_filepath(bentofile, None, secure=False)
+        except FileNotFoundError:
+            raise InvalidArgument(f'file "{bentofile}" not found')
+        else:
+            build_config = BentoBuildConfig.from_file(bentofile)
+    else:
+        for filename in DEFAULT_BENTO_BUILD_FILES:
+            if os.path.exists(filename):
+                build_config = BentoBuildConfig.from_file(filename)
+                break
+        else:
+            raise InvalidArgument(
+                "No bentofile.yaml or pyproject.toml found, please provide a bentofile path"
+            )
 
     if not build_config.models:
         raise InvalidArgument(
             "No model to pull, please provide a model tag or define models in bentofile.yaml"
         )
     for model_spec in build_config.models:
-        cloud_client.pull_model(
+        cloud_client.model.pull(
             model_spec.tag,
             force=force,
-            context=t.cast("SharedOptions", ctx.obj).cloud_context,
             query=model_spec.filter,
         )
 
@@ -340,10 +343,8 @@ def pull(
     default=10,
     help="Number of threads to use for upload",
 )
-@click.pass_obj
 @inject
 def push(
-    shared_options: SharedOptions,
     model_tag: str,
     force: bool,
     threads: int,
@@ -351,12 +352,13 @@ def push(
     cloud_client: BentoCloudClient = Provide[BentoMLContainer.bentocloud_client],
 ):  # type: ignore (not accessed)
     """Push Model to a remote model store."""
-    model_obj = model_store.get(model_tag)
-    if not model_obj:
+    from _bentoml_sdk.models import BentoModel
+
+    model_obj = BentoModel(model_tag)
+    if model_obj.stored is None:
         raise click.ClickException(f"Model {model_tag} not found in local store")
-    cloud_client.push_model(
+    cloud_client.model.push(
         model_obj,
         force=force,
         threads=threads,
-        context=shared_options.cloud_context,
     )

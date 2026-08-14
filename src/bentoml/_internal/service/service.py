@@ -5,6 +5,7 @@ import inspect
 import logging
 import os
 import sys
+import tempfile
 import typing as t
 from functools import partial
 
@@ -23,6 +24,7 @@ from ..models import Model
 from ..runner.runner import AbstractRunner
 from ..runner.runner import Runner
 from ..tag import Tag
+from ..utils import deprecated
 from ..utils import first_not_none
 from .inference_api import InferenceAPI
 
@@ -30,7 +32,6 @@ if t.TYPE_CHECKING:
     import grpc
 
     import bentoml
-    from _bentoml_sdk import Service as NewService
     from bentoml.grpc.types import AddServicerFn
     from bentoml.grpc.types import ServicerClass
     from bentoml.triton import _TritonRunner
@@ -38,11 +39,11 @@ if t.TYPE_CHECKING:
     from ...grpc.v1 import service_pb2_grpc as services
     from .. import external_typing as ext
     from ..bento import Bento
-    from ..types import LifecycleHook
     from .openapi.specification import OpenAPISpecification
 
+    Hook = t.Callable[[], None | t.Coroutine[t.Any, t.Any, None]]
     ContextFunc = t.Callable[[Context], None | t.Coroutine[t.Any, t.Any, None]]
-    HookF = t.TypeVar("HookF", bound=LifecycleHook)
+    HookF = t.TypeVar("HookF", bound=Hook)
     HookF_ctx = t.TypeVar("HookF_ctx", bound=ContextFunc)
 
     class _inference_api_wrapper(t.Generic[IOType]):
@@ -78,6 +79,9 @@ def get_valid_service_name(user_provided_svc_name: str) -> str:
     return lower_name
 
 
+@deprecated(
+    "bentoml.legacy.Service", suggestion="Please upgrade to @bentoml.service()."
+)
 @attr.define(frozen=False, init=False)
 class Service:
     """The service definition is the manifestation of the Service Oriented Architecture
@@ -127,15 +131,14 @@ class Service:
     context: Context = attr.field(init=False, factory=Context)
 
     # hooks
-    startup_hooks: list[LifecycleHook] = attr.field(init=False, factory=list)
-    shutdown_hooks: list[LifecycleHook] = attr.field(init=False, factory=list)
-    deployment_hooks: list[LifecycleHook] = attr.field(init=False, factory=list)
+    startup_hooks: list[Hook] = attr.field(init=False, factory=list)
+    shutdown_hooks: list[Hook] = attr.field(init=False, factory=list)
+    deployment_hooks: list[Hook] = attr.field(init=False, factory=list)
 
     def __reduce__(self):
         """
-        Make bentoml.Service pickle serializable
+        Make bentoml.legacy.Service pickle serializable
         """
-        import fs
 
         from bentoml._internal.bento.bento import Bento
         from bentoml._internal.configuration.containers import BentoMLContainer
@@ -146,10 +149,12 @@ class Service:
 
         if self.bento:
             if serialization_strategy == "EXPORT_BENTO":
-                temp_fs = fs.open_fs("temp:///")
-                tmp_path = temp_fs.getsyspath("/")
-                bento_path = self.bento.export(tmp_path, output_format="tar")
-                content = open(bento_path, "rb").read()
+                temp_name = tempfile.mktemp(prefix="bentoml-export-", suffix=".bento")
+                try:
+                    self.bento.export(temp_name)
+                    content = open(temp_name, "rb").read()
+                finally:
+                    os.remove(temp_name)
 
                 def load_exported_bento(bento_tag: Tag, content: bytes):
                     tmp_bento_store = BentoMLContainer.tmp_bento_store.get()
@@ -157,11 +162,12 @@ class Service:
                         bento = tmp_bento_store.get(bento_tag)
                         return load_bento_dir(bento.path)
                     except NotFound:
-                        temp_fs = fs.open_fs("temp:///")
-                        temp_fs.writebytes("/import.bento", content)
-                        bento = Bento.import_from(
-                            temp_fs.getsyspath("/import.bento")
-                        ).save(tmp_bento_store)
+                        temp_name = tempfile.mktemp(
+                            prefix="bentoml-import-", suffix=".bento"
+                        )
+                        with open(temp_name, "wb") as f:
+                            f.write(content)
+                        bento = Bento.import_from(temp_name).save(tmp_bento_store)
                         return load_bento_dir(bento.path)
 
                 return (
@@ -186,7 +192,7 @@ class Service:
                         return load_bento_dir(bento.path)
                     except NotFound:
                         cloud_client = BentoMLContainer.bentocloud_client.get()
-                        cloud_client.pull_bento(bento_tag, bento_store=tmp_bento_store)
+                        cloud_client.bento.pull(bento_tag, bento_store=tmp_bento_store)
                         return get_or_pull(bento_tag)
 
                 return (get_or_pull, (self.bento.tag,))
@@ -202,7 +208,7 @@ class Service:
         runners: list[AbstractRunner] | None = None,
         models: list[Model] | None = None,
     ):
-        """Service definition itself. Runners and models can be optionally pass into a ``bentoml.Service``.
+        """Service definition itself. Runners and models can be optionally pass into a ``bentoml.legacy.Service``.
 
         Args:
             name: name of the service
@@ -215,9 +221,9 @@ class Service:
         if runners is not None:
             runner_names: t.Set[str] = set()
             for r in runners:
-                assert isinstance(
-                    r, AbstractRunner
-                ), f'Service runners list can only contain bentoml.Runner instances, type "{type(r)}" found.'
+                assert isinstance(r, AbstractRunner), (
+                    f'Service runners list can only contain bentoml.legacy.Runner instances, type "{type(r)}" found.'
+                )
 
                 if r.name in runner_names:
                     raise ValueError(
@@ -228,9 +234,9 @@ class Service:
         # validate models list contains Model instances
         if models is not None:
             for model in models:
-                assert isinstance(
-                    model, Model
-                ), f'Service models list can only contain bentoml.Model instances, type "{type(model)}" found.'
+                assert isinstance(model, Model), (
+                    f'Service models list can only contain bentoml.Model instances, type "{type(model)}" found.'
+                )
 
         self.__attrs_init__(  # type: ignore
             name=name,
@@ -257,12 +263,13 @@ class Service:
                     import_module = sys.modules["__main__"].__file__
                 else:
                     raise BentoMLException(
-                        "Failed to get service import origin, bentoml.Service object defined interactively in console or notebook is not supported"
+                        "Failed to get service import origin, bentoml.legacy.Service object defined interactively"
+                        " in console or notebook is not supported"
                     )
 
             if self._caller_module not in sys.modules:
                 raise BentoMLException(
-                    "Failed to get service import origin, bentoml.Service object must be defined in a module"
+                    "Failed to get service import origin, bentoml.legacy.Service object must be defined in a module"
                 )
 
             for name, value in vars(sys.modules[self._caller_module]).items():
@@ -272,7 +279,7 @@ class Service:
 
             if not self._import_str:
                 raise BentoMLException(
-                    "Failed to get service import origin, bentoml.Service object must be assigned to a variable at module level"
+                    "Failed to get service import origin, bentoml.legacy.Service object must be assigned to a variable at module level"
                 )
 
         assert self._working_dir is not None
@@ -327,7 +334,7 @@ class Service:
 
     def __repr__(self):
         if self.bento:
-            return f'bentoml.Service(tag="{self.tag}", ' f'path="{self.bento.path}")'
+            return f'bentoml.Service(tag="{self.tag}", path="{self.bento.path}")'
 
         try:
             import_str, working_dir = self.get_service_import_origin()
@@ -339,7 +346,7 @@ class Service:
         except BentoMLException:
             return (
                 f'bentoml.Service(name="{self.name}", '
-                f'runners=[{",".join([r.name for r in self.runners])}])'
+                f"runners=[{','.join([r.name for r in self.runners])}])"
             )
 
     def __str__(self) -> str:
@@ -431,8 +438,7 @@ class Service:
     def mount_wsgi_app(
         self, app: ext.WSGIApp, path: str = "/", name: t.Optional[str] = None
     ) -> None:
-        # TODO: Migrate to a2wsgi
-        from starlette.middleware.wsgi import WSGIMiddleware
+        from a2wsgi import WSGIMiddleware
 
         self.mount_apps.append((WSGIMiddleware(app), path, name))  # type: ignore
 
@@ -477,10 +483,5 @@ class Service:
     def add_grpc_handlers(self, handlers: list[grpc.GenericRpcHandler]) -> None:
         self.grpc_handlers.extend(handlers)
 
-
-def on_load_bento(svc: Service | NewService[t.Any], bento: Bento):
-    if isinstance(svc, Service):
-        svc.bento = bento
-        svc.tag = bento.info.tag
-    else:
-        svc.bento = bento
+    def on_load_bento(self, bento: Bento) -> None:
+        self.bento = bento

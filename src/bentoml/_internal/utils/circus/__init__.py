@@ -6,6 +6,7 @@ from threading import Thread
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
+import attrs
 from circus.arbiter import Arbiter as _Arbiter
 
 if TYPE_CHECKING:
@@ -25,32 +26,36 @@ class Arbiter(_Arbiter):
 
     def start(self, cb: t.Callable[[t.Any], t.Any] | None = None) -> None:
         self.exit_stack.__enter__()
-        return super().start(cb)
+        fut = super().start(cb)
+        if exc := fut.exception():
+            raise exc
 
     def stop(self) -> None:
         self.exit_stack.__exit__(None, None, None)
         return super().stop()
 
 
-class ThreadedArbiter(Arbiter, Thread):
+class ThreadedArbiter(Arbiter):
     def __init__(self, *args: t.Any, **kwargs: t.Any) -> None:
-        Arbiter.__init__(self, *args, **kwargs)
-        Thread.__init__(self)
-        self.__cb: t.Optional[t.Callable[[t.Any], t.Any]] = None
+        super().__init__(*args, **kwargs)
+        self._thread: Thread | None = None
 
     def start(self, cb: t.Callable[[t.Any], t.Any] | None = None) -> None:
-        self.__cb = cb
-        Thread.start(self)
+        self._thread = Thread(target=self._worker, args=(cb,), daemon=True)
+        self._thread.start()
 
-    def run(self) -> None:
+    def _worker(self, cb: t.Callable[[t.Any], t.Any] | None = None) -> None:
         # reset the loop in thread
         self.loop = None
-        self.ctrl.loop = self._ensure_ioloop()  # type: ignore[union-attr]
-        Arbiter.start(self, self.__cb)
+        self._ensure_ioloop()
+        self.ctrl.loop = self.loop  # type: ignore[union-attr]
+        super().start(cb)
 
     def stop(self) -> None:
-        self.loop.add_callback(Arbiter.stop, self)  # type: ignore[union-attr]
-        Thread.join(self)
+        if self.loop is not None:
+            self.loop.add_callback(super().stop)  # type: ignore[union-attr]
+        if self._thread is not None:
+            self._thread.join()
 
 
 def create_circus_socket_from_uri(
@@ -98,3 +103,25 @@ def create_standalone_arbiter(
                 check_delay=kwargs.pop("check_delay", 10),
                 **kwargs,
             )
+
+
+@attrs.frozen
+class Server:
+    url: str
+    arbiter: Arbiter = attrs.field(repr=False)
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        self.arbiter.stop()
+
+    @property
+    def running(self) -> bool:
+        return self.arbiter.running
+
+    def __enter__(self) -> Server:
+        return self
+
+    def __exit__(self, exc_type: t.Any, exc_value: t.Any, traceback: t.Any) -> None:
+        self.stop()

@@ -1,14 +1,3 @@
 # BentoML Examples 🎨
 
-The directory contains a collection of example projects demonstrating
-[BentoML](https://github.com/bentoml/BentoML) usage and best practices.
-
-## Index
-
-| Example | Model | Functionality |
-| --- | --- | --- |
-| [inference-graph](./inference-graph/) | Text Generation, Text Classification | Distributed Services, Model Composition, Inference Graph |
-| [io-descriptors](./io-descriptors/) | Pydantic | Custom IO Types |
-| [model-loading-saving](./model-loading-saving/) | Stable Diffusion | Model Store |
-| [monitoring/task_classification](./monitoring/task_classification/) | Classification | Model Monitoring, Classification Tasks |
-| [quickstart](./quickstart/) | Classification | Classification |
+We provide a comprehensive collection of example projects to help you build and scale AI applications with BentoML for different use cases. Check out the [full list](https://docs.bentoml.com/en/latest/use-cases/index.html).

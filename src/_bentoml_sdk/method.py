@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import functools
 import inspect
+import sys
 import typing as t
 
 import attrs
 import pydantic
 
 from bentoml._internal.service.openapi import SUCCESS_DESCRIPTION
+from bentoml._internal.service.openapi.specification import Encoding
 from bentoml._internal.service.openapi.specification import MediaType
 from bentoml._internal.service.openapi.specification import Schema
 from bentoml._internal.utils import dict_filter_none
@@ -41,22 +43,30 @@ def _io_descriptor_converter(it: t.Any) -> type[IODescriptor]:
     return ensure_io_descriptor(it)
 
 
+def _starts_with_slash(
+    instance: t.Any, attribute: attrs.Attribute[str], value: str
+) -> None:
+    if not value.startswith("/"):
+        raise ValueError(f"{attribute.name} must start with a leading slash")
+
+
 @attrs.define
 class APIMethod(t.Generic[P, R]):
     func: t.Callable[t.Concatenate[t.Any, P], R]
-    route: str = attrs.field()
-    name: str = attrs.field()
+    route: str = attrs.field(validator=_starts_with_slash)
+    name: str = attrs.field(init=False)
     input_spec: type[IODescriptor] = attrs.field(converter=_io_descriptor_converter)
     output_spec: type[IODescriptor] = attrs.field(converter=_io_descriptor_converter)
     batchable: bool = False
     batch_dim: tuple[int, int] = attrs.field(
         default=(0, 0), converter=lambda x: (x, x) if not isinstance(x, tuple) else x
     )
-    max_batch_size: int = 100
+    max_batch_size: int = attrs.field(default=100, validator=attrs.validators.gt(1))
     max_latency_ms: int = 60000
     is_stream: bool = attrs.field(init=False)
     doc: str | None = attrs.field(init=False)
     ctx_param: str | None = attrs.field(init=False)
+    is_task: bool = False
 
     @doc.default
     def default_doc(self) -> str | None:
@@ -64,11 +74,32 @@ class APIMethod(t.Generic[P, R]):
 
     @ctx_param.default
     def default_ctx_param(self) -> str | None:
+        from bentoml import Context
+
+        from .io_models import eval_type_lenient
+
+        try:
+            module = sys.modules[self.func.__module__]
+        except KeyError:
+            ns = None
+        else:
+            ns = module.__dict__
+
         parameters = inspect.signature(self.func).parameters
         if "ctx" in parameters:
-            return "ctx"
+            annotation = parameters["ctx"].annotation
+            if (
+                annotation is inspect.Parameter.empty
+                or eval_type_lenient(annotation, ns, None) is Context
+            ):
+                return "ctx"
         elif "context" in parameters:
-            return "context"
+            annotation = parameters["context"].annotation
+            if (
+                annotation is inspect.Parameter.empty
+                or eval_type_lenient(annotation, ns, None) is Context
+            ):
+                return "context"
         return None
 
     @is_stream.default
@@ -89,7 +120,12 @@ class APIMethod(t.Generic[P, R]):
 
     @input_spec.default
     def default_input_spec(self) -> type[IODescriptor]:
-        return IODescriptor.from_input(self.func, skip_self=True)
+        ctx_param = self.default_ctx_param()
+        return IODescriptor.from_input(
+            self.func,
+            skip_self=True,
+            skip_names=(ctx_param,) if ctx_param else (),
+        )
 
     @output_spec.default
     def default_output_spec(self) -> type[IODescriptor]:
@@ -106,11 +142,21 @@ class APIMethod(t.Generic[P, R]):
     def __get__(self, instance: object, owner: type) -> t.Callable[P, R]: ...
 
     def __get__(self: T, instance: t.Any, owner: type) -> t.Callable[P, R] | T:
-        from pydantic.fields import FieldInfo
-        from pydantic_core import PydanticUndefined
-
         if instance is None:
             return self
+
+        local_caller = self._local_call(instance)
+
+        if proxy := getattr(instance, "__self_proxy__", None):
+            func = getattr(proxy, self.name)
+        else:
+            func = local_caller
+        func.local = local_caller  # type: ignore[attr-defined]
+        return func
+
+    def _local_call(self, instance: t.Any) -> t.Callable[P, R]:
+        from pydantic.fields import FieldInfo
+        from pydantic_core import PydanticUndefined
 
         func_sig = inspect.signature(self.func)
         # skip the `self` parameter
@@ -150,6 +196,7 @@ class APIMethod(t.Generic[P, R]):
                 "batchable": self.batchable,
                 "input": _flatten_model_schema(self.input_spec),
                 "output": output,
+                "is_task": self.is_task,
             }
         )
 
@@ -166,9 +213,18 @@ class APIMethod(t.Generic[P, R]):
             {},
             max_depth=1,
         )
+        encoding: dict[str, Encoding] = {}
+        if self.input_spec.mime_type() == "multipart/form-data":
+            for field in self.input_spec.model_fields:
+                if field not in self.input_spec.multipart_fields:
+                    encoding[field] = Encoding(contentType="application/json")
 
         return {
-            "content": {self.input_spec.mime_type(): MediaType(schema=Schema(**input))},
+            "content": {
+                self.input_spec.mime_type(): MediaType(
+                    schema=Schema(**input), encoding=encoding or None
+                )
+            },
         }
 
     def openapi_response(self) -> dict[str, t.Any]:

@@ -93,7 +93,7 @@ class PILImageEncoder:
     ) -> dict[str, t.Any]:
         value = handler(schema)
         if handler.mode == "validation":
-            value.update({"type": "file", "format": "image"})
+            value.update({"type": "file", "format": "image", "pil": True})
         else:
             value.update({"type": "string", "format": "binary"})
         return value
@@ -124,12 +124,13 @@ class FileSchema:
         return obj.read_bytes()
 
     def decode(self, obj: bytes | t.BinaryIO | UploadFile | PurePath | str) -> t.Any:
-        from bentoml._internal.context import request_directory
+        from bentoml._internal.context import request_temp_dir
 
         media_type: str | None = None
 
         if isinstance(obj, str):
-            return obj
+            body = obj.encode("utf-8")
+            filename = None
         if isinstance(obj, PurePath):
             return Path(obj)
         if isinstance(obj, UploadFile):
@@ -143,16 +144,21 @@ class FileSchema:
                 if (fn := getattr(obj, "name", None)) is not None
                 else None
             )
-        else:
-            body = t.cast(bytes, obj)
+        elif isinstance(obj, bytes):
+            body = obj
             filename = None
+        else:
+            from pydantic_core import PydanticCustomError
+
+            raise PydanticCustomError("path_type", "Invalid file type")
         if media_type is not None and self.content_type is not None:
             if not fnmatch.fnmatch(media_type, self.content_type):
                 raise ValueError(
                     f"Invalid content type {media_type}, expected {self.content_type}"
                 )
+        suffix = os.path.basename(filename) if filename else None
         with tempfile.NamedTemporaryFile(
-            suffix=filename, dir=request_directory.get(), delete=False
+            suffix=suffix, dir=request_temp_dir(), delete=False
         ) as f:
             f.write(body)
             return Path(f.name)
@@ -274,7 +280,10 @@ class TensorSchema:
 @attrs.frozen(unsafe_hash=True)
 class DataframeSchema:
     orient: str = "records"
-    columns: list[str] | None = None
+    columns: tuple[str] | None = attrs.field(
+        default=None,
+        converter=lambda x: tuple(x) if x else None,
+    )
 
     def __get_pydantic_json_schema__(
         self, schema: core_schema.CoreSchema, handler: GetJsonSchemaHandler

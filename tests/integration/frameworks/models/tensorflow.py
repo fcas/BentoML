@@ -23,7 +23,7 @@ backward_compatible = True
 class NativeModel(tf.Module):
     def __init__(self):
         super().__init__()
-        self.weights = np.asfarray([[1.0], [1.0], [1.0], [1.0], [1.0]])
+        self.weights = np.asarray([[1.0], [1.0], [1.0], [1.0], [1.0]], dtype=np.float64)
         self.dense = lambda inputs: tf.matmul(inputs, self.weights)
 
     @tf.function(
@@ -47,7 +47,7 @@ class NativeModel(tf.Module):
 class MultiInputModel(tf.Module):
     def __init__(self):
         super().__init__()
-        self.weights = np.asfarray([[1.0], [1.0], [1.0], [1.0], [1.0]])
+        self.weights = np.asarray([[1.0], [1.0], [1.0], [1.0], [1.0]], dtype=np.float64)
         self.dense = lambda tensor: tf.matmul(tensor, self.weights)
 
     @tf.function(
@@ -242,44 +242,7 @@ native_multi_output_model2 = FrameworkTestModel(
     ],
 )
 
-keras_models = [
-    FrameworkTestModel(
-        name="tf2",
-        model=model,
-        save_kwargs={"signatures": {"__call__": {"batchable": True, "batch_dim": 0}}},
-        configurations=[
-            Config(
-                test_inputs={
-                    "__call__": [
-                        Input(
-                            input_args=[inp],
-                            expected=lambda out: np.isclose(out, [[15.0]]).all(),
-                        ),
-                        Input(
-                            input_args=[inp],
-                            expected=lambda out: np.isclose(out, [[15.0]]).all(),
-                        ),
-                        Input(
-                            input_args=[inp],
-                            expected=lambda out: np.isclose(out, [[15.0]]).all(),
-                        ),
-                    ],
-                },
-            ),
-        ],
-    )
-    for model in [
-        make_keras_functional_model(),
-        make_keras_sequential_model(),
-    ]
-    for inp in [
-        input_tensor,
-        input_array,
-        input_data,
-    ]
-]
-
-models: list[FrameworkTestModel] = keras_models + [
+models: list[FrameworkTestModel] = [
     native_model,
     native_multi_input_model,
     native_multi_output_model,

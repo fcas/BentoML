@@ -30,11 +30,6 @@ import click
     help="Working directory for the API server",
 )
 @click.option(
-    "--prometheus-dir",
-    type=click.Path(exists=True),
-    help="Required by prometheus to pass the metrics in multi-process mode",
-)
-@click.option(
     "--worker-id",
     required=False,
     type=click.INT,
@@ -115,7 +110,6 @@ def main(
     backlog: int,
     working_dir: str | None,
     worker_id: int,
-    prometheus_dir: str | None,
     ssl_certfile: str | None,
     ssl_keyfile: str | None,
     ssl_keyfile_password: str | None,
@@ -150,14 +144,11 @@ def main(
         BentoMLContainer.worker_index.set(worker_id)
 
     BentoMLContainer.development_mode.set(development_mode)
-    if prometheus_dir is not None:
-        BentoMLContainer.prometheus_multiproc_dir.set(prometheus_dir)
-
     if runner_map is not None:
         BentoMLContainer.remote_runner_mapping.set(json.loads(runner_map))
     if timeout is not None:
         BentoMLContainer.api_server_config.traffic.timeout.set(timeout)
-    svc = bentoml.load(bento_identifier, working_dir=working_dir, standalone_load=True)
+    svc = bentoml.load(bento_identifier, working_dir=working_dir)
 
     # setup context
     server_context.service_name = svc.name

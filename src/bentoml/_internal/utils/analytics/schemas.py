@@ -21,7 +21,8 @@ from simple_di import inject
 from ...cloud.config import CloudClientConfig
 from ...configuration import BENTOML_VERSION
 from ...configuration.containers import BentoMLContainer
-from ...utils import bentoml_cattr
+from ...utils import is_jupyter
+from ...utils.cattr import bentoml_cattr
 
 if t.TYPE_CHECKING:
     from pathlib import Path
@@ -82,7 +83,7 @@ def get_yatai_user_email(
     cloud_config: Path = Provide[BentoMLContainer.cloud_config],
 ) -> str | None:
     if cloud_config.exists():
-        return CloudClientConfig.get_config(cloud_config).get_current_context().email
+        return CloudClientConfig.get_config(cloud_config).get_context().email
 
 
 @lru_cache(maxsize=1)
@@ -90,20 +91,6 @@ def is_interactive() -> bool:
     import __main__ as main
 
     return not hasattr(main, "__file__")
-
-
-@lru_cache(maxsize=1)
-def in_notebook() -> bool:
-    try:
-        from IPython import get_ipython
-
-        if "IPKernelApp" not in get_ipython().config:  # pragma: no cover
-            return False
-    except ImportError:
-        return False
-    except AttributeError:
-        return False
-    return True
 
 
 @attr.define
@@ -116,7 +103,7 @@ class CommonProperties:
     bentoml_version: str = attr.field(default=BENTOML_VERSION)
     python_version: str = attr.field(factory=get_python_version)
     is_interactive: bool = attr.field(factory=is_interactive)
-    in_notebook: bool = attr.field(factory=in_notebook)
+    in_notebook: bool = attr.field(factory=is_jupyter)
 
     # resource related
     memory_usage_percent: float = attr.field(init=False)
@@ -168,6 +155,7 @@ class CliEvent(EventMeta):
 
 @attr.define
 class BentoBuildEvent(CliEvent):
+    bentoml_version: str = BENTOML_VERSION
     bento_creation_timestamp: t.Optional[datetime] = attr.field(default=None)
     bento_size_in_kb: float = attr.field(default=0)
     model_size_in_kb: float = attr.field(default=0)
@@ -175,7 +163,6 @@ class BentoBuildEvent(CliEvent):
     num_of_models: int = attr.field(default=0)
     num_of_runners: int = attr.field(default=0)
     model_types: t.List[str] = attr.field(factory=list)
-    runnable_types: t.List[str] = attr.field(factory=list)
 
 
 @attr.define

@@ -6,6 +6,7 @@ import sys
 import typing as t
 
 import click
+import rich
 
 if t.TYPE_CHECKING:
     P = t.ParamSpec("P")
@@ -28,12 +29,11 @@ def deprecated_option(*param_decls: str, **attrs: t.Any):
     ):
         if value is not param.default and deprecated:
             name = "'--%(name)s'" if attrs.get("is_flag", False) else "'%(name)s'"
-            DEPRECATION_WARNING = f"DeprecationWarning: The parameter {name} is deprecated and will be removed in the future. (Current behaviour: %(new_behaviour)s)"
-            click.secho(
+            DEPRECATION_WARNING = f"[yellow]DeprecationWarning: The parameter {name} is deprecated and will be removed in the future. (Current behaviour: %(new_behaviour)s)[/]"
+            rich.print(
                 DEPRECATION_WARNING
                 % {"name": param.name, "new_behaviour": new_behaviour},
-                fg="yellow",
-                err=True,
+                file=sys.stderr,
             )
 
     def decorator(f: F[t.Any]) -> t.Callable[[F[t.Any]], click.Command]:
@@ -53,6 +53,7 @@ def build_serve_command() -> click.Group:
     from bentoml_cli.env_manager import env_manager
     from bentoml_cli.utils import AliasCommand
     from bentoml_cli.utils import BentoMLCommandGroup
+    from bentoml_cli.utils import build_args_option
 
     @click.group(name="serve", cls=BentoMLCommandGroup)
     def cli():
@@ -81,26 +82,23 @@ def build_serve_command() -> click.Group:
         "-p",
         "--port",
         type=click.INT,
-        default=BentoMLContainer.http.port.get(),
         help="The port to listen on for the REST api server",
         envvar="BENTOML_PORT",
-        show_default=True,
+        show_envvar=True,
     )
     @click.option(
         "--host",
         type=click.STRING,
-        default=BentoMLContainer.http.host.get(),
         help="The host to bind for the REST api server",
         envvar="BENTOML_HOST",
-        show_default=True,
+        show_envvar=True,
     )
     @click.option(
         "--api-workers",
         type=click.INT,
-        default=BentoMLContainer.api_server_workers.get(),
         help="Specify the number of API server workers to start. Default to number of available CPU cores in production mode",
         envvar="BENTOML_API_WORKERS",
-        show_default=True,
+        show_envvar=True,
         hidden=True,
     )
     @click.option(
@@ -113,7 +111,6 @@ def build_serve_command() -> click.Group:
     @click.option(
         "--backlog",
         type=click.INT,
-        default=BentoMLContainer.api_server_config.backlog.get(),
         help="The maximum number of pending connections.",
         show_default=True,
         hidden=True,
@@ -136,7 +133,6 @@ def build_serve_command() -> click.Group:
     @click.option(
         "--ssl-certfile",
         type=str,
-        default=BentoMLContainer.ssl.certfile.get(),
         help="SSL certificate file",
         show_default=True,
         hidden=True,
@@ -144,7 +140,6 @@ def build_serve_command() -> click.Group:
     @click.option(
         "--ssl-keyfile",
         type=str,
-        default=BentoMLContainer.ssl.keyfile.get(),
         help="SSL key file",
         show_default=True,
         hidden=True,
@@ -152,7 +147,6 @@ def build_serve_command() -> click.Group:
     @click.option(
         "--ssl-keyfile-password",
         type=str,
-        default=BentoMLContainer.ssl.keyfile_password.get(),
         help="SSL keyfile password",
         show_default=True,
         hidden=True,
@@ -160,7 +154,6 @@ def build_serve_command() -> click.Group:
     @click.option(
         "--ssl-version",
         type=int,
-        default=BentoMLContainer.ssl.version.get(),
         help="SSL version to use (see stdlib 'ssl' module)",
         show_default=True,
         hidden=True,
@@ -168,7 +161,6 @@ def build_serve_command() -> click.Group:
     @click.option(
         "--ssl-cert-reqs",
         type=int,
-        default=BentoMLContainer.ssl.cert_reqs.get(),
         help="Whether client certificate is required (see stdlib 'ssl' module)",
         show_default=True,
         hidden=True,
@@ -176,7 +168,6 @@ def build_serve_command() -> click.Group:
     @click.option(
         "--ssl-ca-certs",
         type=str,
-        default=BentoMLContainer.ssl.ca_certs.get(),
         help="CA certificates file",
         show_default=True,
         hidden=True,
@@ -184,7 +175,6 @@ def build_serve_command() -> click.Group:
     @click.option(
         "--ssl-ciphers",
         type=str,
-        default=BentoMLContainer.ssl.ciphers.get(),
         help="Ciphers to use (see stdlib 'ssl' module)",
         show_default=True,
         hidden=True,
@@ -203,6 +193,7 @@ def build_serve_command() -> click.Group:
         show_default=True,
         hidden=True,
     )
+    @build_args_option
     @env_manager
     def serve(  # type: ignore (unused warning)
         bento: str,
@@ -258,8 +249,8 @@ def build_serve_command() -> click.Group:
         - when specified, respect 'include' and 'exclude' under 'bentofile.yaml' as well as the '.bentoignore' file in '--working-dir', for code and file changes
         - all model store changes will also trigger a restart (new model saved or existing model removed)
         """
-        from bentoml import Service
         from bentoml._internal.service.loader import load
+        from bentoml.legacy import Service
 
         configure_server_logging()
         if working_dir is None:
@@ -272,7 +263,7 @@ def build_serve_command() -> click.Group:
         svc = load(bento_identifier=bento, working_dir=working_dir)
         if isinstance(svc, Service):
             # bentoml<1.2
-            from bentoml.serve import serve_http_production
+            from bentoml.serving import serve_http_production
 
             if development:
                 serve_http_production(
@@ -458,7 +449,6 @@ def build_serve_command() -> click.Group:
         default=LATEST_PROTOCOL_VERSION,
         show_default=True,
     )
-    @env_manager
     def serve_grpc(  # type: ignore (unused warning)
         bento: str,
         development: bool,
@@ -516,7 +506,7 @@ def build_serve_command() -> click.Group:
             else:
                 working_dir = "."
 
-        from bentoml.serve import serve_grpc_production
+        from bentoml.serving import serve_grpc_production
 
         if development:
             serve_grpc_production(

@@ -44,11 +44,6 @@ import click
     type=click.INT,
     help="Specify the timeout (seconds) for runner",
 )
-@click.option(
-    "--prometheus-dir",
-    type=click.Path(exists=True),
-    help="Required by prometheus to pass the metrics in multi-process mode",
-)
 def main(
     bento_identifier: str,
     runner_name: str,
@@ -58,7 +53,6 @@ def main(
     worker_id: int,
     timeout: int | None,
     worker_env_map: str | None,
-    prometheus_dir: str | None,
 ) -> None:
     """
     Start a runner server.
@@ -73,15 +67,15 @@ def main(
     """
 
     # setting up the environment for the worker process
-    assert (
-        "bentoml" not in sys.modules
-    ), "bentoml should not be imported before setting up the environment, otherwise some of the environment may not take effect"
+    assert "bentoml" not in sys.modules, (
+        "bentoml should not be imported before setting up the environment, otherwise some of the environment may not take effect"
+    )
     if worker_env_map is not None:
         env_map: dict[str, dict[str, t.Any]] = json.loads(worker_env_map)
         worker_key = str(worker_id - 1)  # the worker ID is 1-based
-        assert (
-            worker_key in env_map
-        ), f"worker_id {repr(worker_key)} not found in worker_env_map: {worker_env_map}"
+        assert worker_key in env_map, (
+            f"worker_id {repr(worker_key)} not found in worker_env_map: {worker_env_map}"
+        )
         os.environ.update(env_map[worker_key])
 
     import socket
@@ -104,16 +98,13 @@ def main(
 
     from bentoml._internal.configuration.containers import BentoMLContainer
 
-    if prometheus_dir is not None:
-        BentoMLContainer.prometheus_multiproc_dir.set(prometheus_dir)
-
     if no_access_log:
         access_log_config = BentoMLContainer.runners_config.logging.access
         access_log_config.enabled.set(False)
 
     from bentoml._internal.server.runner_app import RunnerAppFactory
 
-    service = load(bento_identifier, working_dir=working_dir, standalone_load=True)
+    service = load(bento_identifier, working_dir=working_dir)
 
     # setup context
     if service.tag is None:
